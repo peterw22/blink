@@ -103,7 +103,9 @@ u64 HandlePageFault(struct Machine *m, u8 *pslot, u64 entry) {
         m->system->memstat.reserved -= 1;
         entry = x;
       } else {
-        FreeAnonymousPage(m->system, (u8 *)(uintptr_t)(page & PAGE_TA));
+        // another thread won the race; return our page to the pool. In
+        // non-linear mode PAGE_TA holds an index, not the host pointer.
+        FreeAnonymousPage(m->system, FindHostPage(page));
         entry = LoadPte(pslot);
         m->system->rss -= 1;
       }

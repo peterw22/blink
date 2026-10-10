@@ -165,10 +165,17 @@ struct HostPage {
   struct HostPage *next;
 };
 
+// Non-linear mode stores host page pointers out of line, because a page
+// table entry's address field (PAGE_TA) is too narrow for them; entries
+// hold an index into this table. Lookups happen without locks on every
+// guest memory access from every thread, so storage must never move or be
+// freed: a fixed top level points at chunks that are allocated once.
+#define kHostPagesChunk 4096
+#define kHostPagesChunks 4096  // 2^24 entries: all PAGE_TA can index
 struct HostPages {
+  pthread_mutex_t_ lock;
   size_t n;
-  size_t c;
-  u8 **p;
+  u8 **_Atomic chunks[kHostPagesChunks];
 };
 
 struct PageLock {
@@ -549,6 +556,8 @@ int ProtectVirtual(struct System *, i64, i64, int, bool);
 bool IsFullyMapped(struct System *, i64, i64);
 bool IsFullyUnmapped(struct System *, i64, i64);
 void DiscardVirtual(struct System *, i64, i64);
+void VisitGuestMappings(struct System *, void (*)(void *, i64, i64, u64),
+                        void *);
 int GetProtection(u64);
 u64 SetProtection(int);
 int ClassifyOp(u64) pureconst;
@@ -843,7 +852,9 @@ static inline u8 *FindHostPage(u64 entry) {
   if (HasLinearMapping()) {
     return (u8 *)(uintptr_t)(entry & PAGE_TA);
   } else {
-    return g_hostpages.p[(entry & PAGE_TA) >> 12];
+    size_t i = (entry & PAGE_TA) >> 12;
+    return atomic_load_explicit(&g_hostpages.chunks[i / kHostPagesChunk],
+                                memory_order_acquire)[i % kHostPagesChunk];
   }
 }
 

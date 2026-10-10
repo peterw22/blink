@@ -286,6 +286,8 @@ int VfsAcquireDevice(struct VfsDevice *, struct VfsDevice **);
 int VfsFreeDevice(struct VfsDevice *);
 int VfsFreeInfo(struct VfsInfo *);
 int VfsAddFd(struct VfsInfo *);
+int VfsGetFd(int, struct VfsInfo **);
+int VfsNthFd(int);
 int VfsFreeFd(int, struct VfsInfo **);
 int VfsSetFd(int, struct VfsInfo *);
 ssize_t VfsPathBuildFull(struct VfsInfo *, struct VfsInfo *, char **);

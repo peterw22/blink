@@ -19,6 +19,8 @@
 #include "blink/procfs.h"
 
 #include <fcntl.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -26,7 +28,10 @@
 #include "blink/errno.h"
 #include "blink/log.h"
 #include "blink/machine.h"
+#include "blink/macros.h"
 #include "blink/timespec.h"
+#include "blink/tunables.h"
+#include "blink/util.h"
 #include "blink/vfs.h"
 
 #ifdef __EMSCRIPTEN__
@@ -46,7 +51,7 @@
 
 #ifndef DISABLE_VFS
 
-#define PROCFS_NAME_MAX 16
+#define PROCFS_NAME_MAX 32
 #define PROCFS_READ_LEN 4096
 #define PROCFS_DELETED  " (deleted)"
 
@@ -97,8 +102,18 @@ enum {
   PROCFS_SELF_INO,
   PROCFS_SYS_INO,
   PROCFS_UPTIME_INO,
+  PROCFS_VERSION_INO,
+  PROCFS_CPUINFO_INO,
 
   PROCFS_FIRST_PID_INO
+};
+
+// /proc/sys/vm/* live outside the root listing, in their own inode range
+enum {
+  PROCFS_SYSVM_INO = 1000,
+  PROCFS_SYSVM_MMAP_MIN_ADDR_INO,
+  PROCFS_SYSVM_OVERCOMMIT_MEMORY_INO,
+  PROCFS_SYSVM_MAX_MAP_COUNT_INO,
 };
 
 enum {
@@ -109,6 +124,10 @@ enum {
   PROCFS_SELF_TYPE,
   PROCFS_SYS_TYPE,
   PROCFS_UPTIME_TYPE,
+  PROCFS_VERSION_TYPE,
+  PROCFS_CPUINFO_TYPE,
+  PROCFS_SYSVM_TYPE,
+  PROCFS_SYSVM_FILE_TYPE,
 
   PROCFS_PIDDIR_TYPE,
   PROCFS_PIDDIR_EXE_TYPE,
@@ -116,7 +135,11 @@ enum {
   PROCFS_PIDDIR_ROOT_TYPE,
   PROCFS_PIDDIR_MOUNTS_TYPE,
   PROCFS_PIDDIR_FDDIR_TYPE,
-  PROCFS_PIDDIR_LAST_TYPE = PROCFS_PIDDIR_FDDIR_TYPE
+  PROCFS_PIDDIR_MAPS_TYPE,
+  PROCFS_PIDDIR_STATM_TYPE,
+  PROCFS_PIDDIR_STAT_TYPE,
+  PROCFS_PIDDIR_LAST_TYPE = PROCFS_PIDDIR_STAT_TYPE,
+  PROCFS_PIDDIR_FDLINK_TYPE,  // /proc/PID/fd/N, not listed in the pid dir
 };
 
 static int ProcfsRootReaddir(struct VfsInfo *, struct dirent *);
@@ -131,6 +154,14 @@ static ssize_t ProcfsPiddirExeReadlink(struct VfsInfo *, char **);
 static ssize_t ProcfsPiddirCwdReadlink(struct VfsInfo *, char **);
 static ssize_t ProcfsPiddirRootReadlink(struct VfsInfo *, char **);
 static int ProcfsPiddirMountsRead(struct VfsInfo *, struct ProcfsOpenFile *);
+static int ProcfsPiddirMapsRead(struct VfsInfo *, struct ProcfsOpenFile *);
+static int ProcfsPiddirStatmRead(struct VfsInfo *, struct ProcfsOpenFile *);
+static int ProcfsPiddirStatRead(struct VfsInfo *, struct ProcfsOpenFile *);
+static int ProcfsPiddirFddirReaddir(struct VfsInfo *, struct dirent *);
+static ssize_t ProcfsPiddirFdlinkReadlink(struct VfsInfo *, char **);
+static int ProcfsVersionRead(struct VfsInfo *, struct ProcfsOpenFile *);
+static int ProcfsCpuinfoRead(struct VfsInfo *, struct ProcfsOpenFile *);
+static int ProcfsSysvmRead(struct VfsInfo *, struct ProcfsOpenFile *);
 
 static struct ProcfsInfo g_defaultinfos[] = {
     [PROCFS_ROOT_INO] = {PROCFS_ROOT_INO, S_IFDIR | 0555, 0, 0,
@@ -152,6 +183,22 @@ static struct ProcfsInfo g_defaultinfos[] = {
     [PROCFS_UPTIME_INO] = {PROCFS_UPTIME_INO, S_IFREG | 0444, 0, 0,
                            PROCFS_UPTIME_TYPE, "uptime",
                            .read = ProcfsUptimeRead},
+    [PROCFS_VERSION_INO] = {PROCFS_VERSION_INO, S_IFREG | 0444, 0, 0,
+                            PROCFS_VERSION_TYPE, "version",
+                            .read = ProcfsVersionRead},
+    [PROCFS_CPUINFO_INO] = {PROCFS_CPUINFO_INO, S_IFREG | 0444, 0, 0,
+                            PROCFS_CPUINFO_TYPE, "cpuinfo",
+                            .read = ProcfsCpuinfoRead},
+};
+
+static struct ProcfsInfo g_sysvminfos[] = {
+    {PROCFS_SYSVM_INO, S_IFDIR | 0555, 0, 0, PROCFS_SYSVM_TYPE, "vm"},
+    {PROCFS_SYSVM_MMAP_MIN_ADDR_INO, S_IFREG | 0444, 0, 0,
+     PROCFS_SYSVM_FILE_TYPE, "mmap_min_addr", .read = ProcfsSysvmRead},
+    {PROCFS_SYSVM_OVERCOMMIT_MEMORY_INO, S_IFREG | 0444, 0, 0,
+     PROCFS_SYSVM_FILE_TYPE, "overcommit_memory", .read = ProcfsSysvmRead},
+    {PROCFS_SYSVM_MAX_MAP_COUNT_INO, S_IFREG | 0444, 0, 0,
+     PROCFS_SYSVM_FILE_TYPE, "max_map_count", .read = ProcfsSysvmRead},
 };
 
 static struct ProcfsInfo g_piddirinfos[] = {
@@ -173,8 +220,30 @@ static struct ProcfsInfo g_piddirinfos[] = {
                                .read = ProcfsPiddirMountsRead},
     [PROCFS_PIDDIR_FDDIR_TYPE - PROCFS_PIDDIR_TYPE] = {0, S_IFDIR | 0555, 0, 0,
                                                        PROCFS_PIDDIR_FDDIR_TYPE,
-                                                       "fd"},
+                                                       "fd",
+                                                       .readdir =
+                                                           ProcfsPiddirFddirReaddir},
+    [PROCFS_PIDDIR_MAPS_TYPE - PROCFS_PIDDIR_TYPE] = {0, S_IFREG | 0444, 0, 0,
+                                                      PROCFS_PIDDIR_MAPS_TYPE,
+                                                      "maps",
+                                                      .read =
+                                                          ProcfsPiddirMapsRead},
+    [PROCFS_PIDDIR_STATM_TYPE - PROCFS_PIDDIR_TYPE] = {
+        0, S_IFREG | 0444, 0, 0, PROCFS_PIDDIR_STATM_TYPE, "statm",
+        .read = ProcfsPiddirStatmRead},
+    [PROCFS_PIDDIR_STAT_TYPE - PROCFS_PIDDIR_TYPE] = {
+        0, S_IFREG | 0444, 0, 0, PROCFS_PIDDIR_STAT_TYPE, "stat",
+        .read = ProcfsPiddirStatRead},
+    [PROCFS_PIDDIR_FDLINK_TYPE - PROCFS_PIDDIR_TYPE] = {
+        0, S_IFLNK | 0777, 0, 0, PROCFS_PIDDIR_FDLINK_TYPE, "",
+        .readlink = ProcfsPiddirFdlinkReadlink},
 };
+
+// The guest's pid, which differs from the host's once guest processes run
+// inside a single host process.
+static int ProcfsPid(void) {
+  return g_machine ? g_machine->system->pid : getpid();
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -347,7 +416,7 @@ static int ProcfsFinddir(struct VfsInfo *parent, const char *name,
       if (procoutput == NULL) {
         pid = -1;
         sscanf(name, "%d", &pid);
-        if (pid == getpid()) {
+        if (pid == ProcfsPid()) {
           if (ProcfsCreatePiddirInfo(&procoutput, NULL, pid,
                                      PROCFS_PIDDIR_ROOT_TYPE) == -1) {
             goto cleananddie;
@@ -355,6 +424,40 @@ static int ProcfsFinddir(struct VfsInfo *parent, const char *name,
         }
       }
       // TODO(trungnt): PID-specific directories of other processes.
+      break;
+    case PROCFS_PIDDIR_FDDIR_TYPE: {
+      int fd;
+      char *end;
+      struct VfsInfo *target;
+      fd = strtol(name, &end, 10);
+      if (*name && !*end && fd >= 0 && VfsGetFd(fd, &target) == 0) {
+        unassert(!VfsFreeInfo(target));
+        if (ProcfsCreatePiddirInfo(&procoutput, procparent, -1,
+                                   PROCFS_PIDDIR_FDLINK_TYPE) == -1) {
+          goto cleananddie;
+        }
+        procoutput->ino = procparent->ino + 1000 + fd;
+        snprintf(procoutput->name, sizeof(procoutput->name), "%d", fd);
+      }
+      break;
+    }
+    case PROCFS_SYS_TYPE:
+    case PROCFS_SYSVM_TYPE:
+      for (i = 0; i < ARRAYLEN(g_sysvminfos); ++i) {
+        if ((procparent->type == PROCFS_SYS_TYPE) ==
+                (g_sysvminfos[i].type == PROCFS_SYSVM_TYPE) &&
+            !strcmp(name, g_sysvminfos[i].name)) {
+          if (!(procoutput = malloc(sizeof(*procoutput)))) {
+            enomem();
+            goto cleananddie;
+          }
+          *procoutput = g_sysvminfos[i];
+          procoutput->uid = getuid();
+          procoutput->gid = getgid();
+          procoutput->time = GetTime();
+          break;
+        }
+      }
       break;
     case PROCFS_PIDDIR_TYPE:
       for (i = 1; i <= PROCFS_PIDDIR_LAST_TYPE - PROCFS_PIDDIR_TYPE; ++i) {
@@ -992,7 +1095,7 @@ struct VfsInfo *g_selfexeinfo = NULL;
 
 int ProcfsRegisterExe(i32 pid, const char *path) {
   struct VfsInfo *newinfo, *tmp;
-  unassert(pid == getpid());
+  unassert(pid == ProcfsPid());
   unassert(!VfsTraverse(path, &newinfo, true));
   tmp = g_selfexeinfo;
   g_selfexeinfo = newinfo;
@@ -1049,7 +1152,7 @@ static int ProcfsRootReaddir(struct VfsInfo *info, struct dirent *de) {
 #ifdef DT_DIR
       de->d_type = DT_DIR;
 #endif
-      sprintf(de->d_name, "%d", getpid());
+      sprintf(de->d_name, "%d", ProcfsPid());
     } else {
       // TODO(trungnt): PID-specific directories for other processes
       ret = enoent();
@@ -1105,7 +1208,7 @@ static ssize_t ProcfsSelfReadlink(struct VfsInfo *info, char **buf) {
   if (!*buf) {
     return enomem();
   }
-  snprintf(*buf, 16, "%d", getpid());
+  snprintf(*buf, 16, "%d", ProcfsPid());
   return strlen(*buf);
 }
 
@@ -1502,5 +1605,211 @@ struct VfsSystem g_procfs = {.name = "proc",
 #endif
                                  .Fexecve = NULL,
                              }};
+
+
+////////////////////////////////////////////////////////////////////////////////
+// generated text files: build the whole text, then serve it in chunks
+
+struct ProcfsText {
+  char *p;
+  size_t n, cap;
+};
+
+static void ProcfsAppendf(struct ProcfsText *t, const char *fmt, ...) {
+  int len;
+  va_list va;
+  for (;;) {
+    va_start(va, fmt);
+    len = vsnprintf(t->p ? t->p + t->n : NULL, t->p ? t->cap - t->n : 0, fmt,
+                    va);
+    va_end(va);
+    if (len < 0) return;
+    if (t->p && t->n + len < t->cap) {
+      t->n += len;
+      return;
+    }
+    t->cap = MAX(t->cap * 2, t->n + len + 256);
+    if (!(t->p = (char *)realloc(t->p, t->cap))) {
+      t->n = t->cap = 0;
+      return;
+    }
+  }
+}
+
+static int ProcfsServeText(struct ProcfsOpenFile *of, struct ProcfsText *t) {
+  size_t n;
+  if (!t->p) return enomem();
+  if (of->index >= t->n) {
+    of->readbufstart = of->readbufend = sizeof(of->readbuf) + 1;
+  } else {
+    n = MIN(t->n - of->index, sizeof(of->readbuf));
+    memcpy(of->readbuf, t->p + of->index, n);
+    of->readbufstart = 0;
+    of->readbufend = n;
+    of->index += n;
+  }
+  free(t->p);
+  return 0;
+}
+
+struct ProcfsMapsCtx {
+  struct System *s;
+  struct ProcfsText *t;
+};
+
+static void ProcfsMapsVisit(void *arg, i64 start, i64 end, u64 key) {
+  struct Dll *e;
+  struct FileMap *fm;
+  const char *name = "";
+  i64 off = 0;
+  struct ProcfsMapsCtx *c = (struct ProcfsMapsCtx *)arg;
+  for (e = dll_first(c->s->filemaps); e; e = dll_next(c->s->filemaps, e)) {
+    fm = FILEMAP_CONTAINER(e);
+    if (fm->virt <= start && start < fm->virt + fm->size) {
+      name = fm->path;
+      if (fm->offset >= 0) off = fm->offset + (start - fm->virt);
+      break;
+    }
+  }
+  ProcfsAppendf(c->t, "%012llx-%012llx %c%c%cp %08llx 00:00 0%s%s\n",
+                (unsigned long long)start, (unsigned long long)end,
+                key & PAGE_U ? 'r' : '-', key & PAGE_RW ? 'w' : '-',
+                key & PAGE_XD ? '-' : 'x', (unsigned long long)off,
+                *name ? "                          " : "", name);
+}
+
+static int ProcfsPiddirMapsRead(struct VfsInfo *info,
+                                struct ProcfsOpenFile *openfile) {
+  struct ProcfsText t = {0};
+  struct ProcfsMapsCtx c;
+  if (!g_machine) return enosys();
+  c.s = g_machine->system;
+  c.t = &t;
+  ProcfsAppendf(&t, "%s", "");
+  LOCK(&c.s->mmap_lock);
+  VisitGuestMappings(c.s, ProcfsMapsVisit, &c);
+  UNLOCK(&c.s->mmap_lock);
+  return ProcfsServeText(openfile, &t);
+}
+
+static int ProcfsPiddirStatmRead(struct VfsInfo *info,
+                                 struct ProcfsOpenFile *openfile) {
+  struct ProcfsText t = {0};
+  long vss = g_machine ? g_machine->system->vss : 0;
+  long rss = g_machine ? g_machine->system->rss : 0;
+  ProcfsAppendf(&t, "%ld %ld 0 0 0 %ld 0\n", vss, rss, rss);
+  return ProcfsServeText(openfile, &t);
+}
+
+static int ProcfsVersionRead(struct VfsInfo *info,
+                             struct ProcfsOpenFile *openfile) {
+  struct ProcfsText t = {0};
+  ProcfsAppendf(&t, "Linux version %d.%d.%d-blink (blink@blink) (gcc) #1 SMP\n",
+                LINUX_MAJOR, LINUX_MINOR, LINUX_PATCH);
+  return ProcfsServeText(openfile, &t);
+}
+
+static int ProcfsCpuinfoRead(struct VfsInfo *info,
+                             struct ProcfsOpenFile *openfile) {
+  int i, n;
+  struct ProcfsText t = {0};
+  ProcfsAppendf(&t, "%s", "");
+  n = GetCpuCount();
+  for (i = 0; i < n; ++i) {
+    ProcfsAppendf(&t,
+                  "processor\t: %d\n"
+                  "vendor_id\t: GenuineIntel\n"
+                  "model name\t: blink x86-64 emulator\n"
+                  "cpu MHz\t\t: 1000.000\n"
+                  "cpu cores\t: %d\n"
+                  "flags\t\t: fpu tsc cx8 cmov clflush mmx fxsr sse sse2 "
+                  "syscall nx rdtscp lm pni pclmulqdq ssse3 cx16 sse4_1 "
+                  "sse4_2 popcnt rdrand hypervisor lahf_lm abm bmi2 adx\n\n",
+                  i, n);
+  }
+  return ProcfsServeText(openfile, &t);
+}
+
+static int ProcfsSysvmRead(struct VfsInfo *info,
+                           struct ProcfsOpenFile *openfile) {
+  struct ProcfsText t = {0};
+  struct ProcfsInfo *procinfo = (struct ProcfsInfo *)info->data;
+  switch (procinfo->ino) {
+    case PROCFS_SYSVM_MMAP_MIN_ADDR_INO:
+      ProcfsAppendf(&t, "65536\n");
+      break;
+    case PROCFS_SYSVM_OVERCOMMIT_MEMORY_INO:
+      ProcfsAppendf(&t, "0\n");
+      break;
+    default:
+      ProcfsAppendf(&t, "65530\n");
+      break;
+  }
+  return ProcfsServeText(openfile, &t);
+}
+
+
+static int ProcfsPiddirFddirReaddir(struct VfsInfo *info, struct dirent *de) {
+  int fd, ret = 0;
+  struct ProcfsInfo *procinfo = (struct ProcfsInfo *)info->data;
+  struct ProcfsOpenDir *dir = procinfo->opendir;
+  LOCK(&dir->lock);
+  if (dir->index < 2) {
+    de->d_ino = dir->index ? info->ino : info->parent->ino;
+#ifdef DT_DIR
+    de->d_type = DT_DIR;
+#endif
+    strcpy(de->d_name, dir->index ? "." : "..");
+  } else if ((fd = VfsNthFd(dir->index - 2)) == -1) {
+    ret = enoent();
+  } else {
+    de->d_ino = info->ino + 1000 + fd;
+#ifdef DT_LNK
+    de->d_type = DT_LNK;
+#endif
+    snprintf(de->d_name, sizeof(de->d_name), "%d", fd);
+  }
+  ++dir->index;
+  UNLOCK(&dir->lock);
+  return ret;
+}
+
+static ssize_t ProcfsPiddirFdlinkReadlink(struct VfsInfo *info, char **buf) {
+  ssize_t rc;
+  struct VfsInfo *target;
+  if (VfsGetFd(atoi(info->name), &target) == -1) return -1;
+  if (target->parent) {
+    rc = VfsPathBuildFull(target, NULL, buf);
+  } else if (!(*buf = (char *)malloc(64))) {
+    rc = enomem();
+  } else {
+    // like Linux, name fds that aren't files by their kind and inode
+    snprintf(*buf, 64,
+             S_ISFIFO(target->mode)   ? "pipe:[%llu]"
+             : S_ISSOCK(target->mode) ? "socket:[%llu]"
+                                      : "anon_inode:[%llu]",
+             (unsigned long long)target->ino);
+    rc = strlen(*buf);
+  }
+  unassert(!VfsFreeInfo(target));
+  return rc;
+}
+
+static int ProcfsPiddirStatRead(struct VfsInfo *info,
+                                struct ProcfsOpenFile *openfile) {
+  struct ProcfsText t = {0};
+  int pid = ProcfsPid();
+  long vss = g_machine ? g_machine->system->vss : 0;
+  long rss = g_machine ? g_machine->system->rss : 0;
+  // pid (comm) state ppid pgrp session tty_nr tpgid flags minflt cminflt
+  // majflt cmajflt utime stime cutime cstime priority nice num_threads
+  // itrealvalue starttime vsize rss rsslim (remaining fields zero)
+  ProcfsAppendf(&t,
+                "%d (blink) R %d %d %d 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 0 "
+                "%lld %ld 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+                "0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+                pid, getppid(), pid, pid, (long long)vss * 4096, rss);
+  return ProcfsServeText(openfile, &t);
+}
 
 #endif /* DISABLE_VFS */

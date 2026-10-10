@@ -51,7 +51,7 @@ struct Allocator {
 };
 
 struct Machine g_bssmachine;
-struct HostPages g_hostpages;
+struct HostPages g_hostpages = {PTHREAD_MUTEX_INITIALIZER_};
 
 static void FillPage(void *p, int c) {
   memset(p, c, 4096);
@@ -70,19 +70,28 @@ static void FreeHostPage(struct HostPage *hp) {
 }
 
 static u64 TrackHostPage(u8 *ptr) {
-  u64 entry;
+  u8 **chunk;
+  size_t entry;
   if (HasLinearMapping()) {
     return (uintptr_t)ptr;
   } else {
-    if (g_hostpages.n == g_hostpages.c) {
-      g_hostpages.c += 1;
-      g_hostpages.c += g_hostpages.c >> 1;
-      g_hostpages.p =
-          realloc(g_hostpages.p, g_hostpages.c * sizeof(*g_hostpages.p));
+    // called from several paths (anonymous pages, file-mapped pages) that
+    // hold different locks, by any thread; readers never lock
+    LOCK(&g_hostpages.lock);
+    entry = g_hostpages.n;
+    unassert(entry < (size_t)kHostPagesChunk * kHostPagesChunks);
+    if (!(chunk = atomic_load_explicit(
+              &g_hostpages.chunks[entry / kHostPagesChunk],
+              memory_order_relaxed))) {
+      unassert((chunk = (u8 **)calloc(kHostPagesChunk, sizeof(*chunk))));
     }
-    entry = g_hostpages.n++;
-    g_hostpages.p[entry] = ptr;
-    return entry << 12;
+    chunk[entry % kHostPagesChunk] = ptr;
+    // publish the chunk (and the slot) before the index can be used
+    atomic_store_explicit(&g_hostpages.chunks[entry / kHostPagesChunk],
+                          chunk, memory_order_release);
+    g_hostpages.n = entry + 1;
+    UNLOCK(&g_hostpages.lock);
+    return (u64)entry << 12;
   }
 }
 
@@ -1306,8 +1315,12 @@ int ProtectVirtual(struct System *s, i64 virt, i64 size, int prot,
               goto MemoryDisappeared;
             }
           }
-          // check for exec -> non-exec
-          if (!(pt & PAGE_XD) && (pt2 & PAGE_XD) && !(pt & PAGE_RSRV)) {
+          // check for exec -> non-exec, or in non-linear mode (which has no
+          // write-fault based self-modifying code detection), for code
+          // pages becoming writable; see CreatePath()
+          if (!(pt & PAGE_RSRV) && !(pt & PAGE_XD) &&
+              ((pt2 & PAGE_XD) ||
+               (!HasLinearMapping() && !(pt & PAGE_RW) && (pt2 & PAGE_RW)))) {
             executable_code_was_made_non_executable = true;
 #ifdef HAVE_JIT
             if (!IsJitDisabled(&s->jit)) {
@@ -1472,6 +1485,58 @@ static i64 FindGuestAddr(struct System *s, uintptr_t hp, u64 pt, long lvl,
     }
   }
   return -1;
+}
+
+struct MappingRun {
+  i64 start, end;
+  u64 key;
+  void (*visit)(void *, i64, i64, u64);
+  void *ctx;
+};
+
+static void FlushMappingRun(struct MappingRun *r) {
+  if (r->end > r->start) r->visit(r->ctx, r->start, r->end, r->key);
+  r->start = r->end = 0;
+}
+
+static void VisitMappingLevel(struct System *s, u64 pt, int level, i64 base,
+                              struct MappingRun *r) {
+  u8 *mi;
+  u64 pte, key;
+  i64 i, virt;
+  if (!(mi = GetPageAddress(s, pt, level == 39))) return;
+  for (i = 0; i < 512; ++i) {
+    pte = LoadPte(mi + i * 8);
+    virt = base | i << level;
+    if (level == 39) virt = (virt << 16) >> 16;  // sign extend 48-bit
+    if (!(pte & PAGE_V)) {
+      FlushMappingRun(r);
+      continue;
+    }
+    if (level > 12) {
+      VisitMappingLevel(s, pte, level - 9, virt, r);
+      continue;
+    }
+    key = pte & (PAGE_U | PAGE_RW | PAGE_XD);
+    if (r->end == virt && r->key == key) {
+      r->end += 4096;
+    } else {
+      FlushMappingRun(r);
+      r->start = virt;
+      r->end = virt + 4096;
+      r->key = key;
+    }
+  }
+}
+
+// Calls visit(ctx, start, end, flags) for each run of contiguous guest pages
+// with identical PAGE_U/PAGE_RW/PAGE_XD flags, in ascending address order.
+// The caller should hold mmap_lock for a consistent snapshot.
+void VisitGuestMappings(struct System *s,
+                        void visit(void *, i64, i64, u64), void *ctx) {
+  struct MappingRun r = {0, 0, 0, visit, ctx};
+  VisitMappingLevel(s, s->cr3, 39, 0, &r);
+  FlushMappingRun(&r);
 }
 
 // Returns the page table entry for a guest virtual address, or 0.

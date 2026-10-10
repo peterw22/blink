@@ -81,6 +81,9 @@
 #include "blink/timespec.h"
 #include "blink/util.h"
 #include "blink/vfs.h"
+#ifndef DISABLE_VFS
+#include "blink/hostfs.h"
+#endif
 #include "blink/xlat.h"
 
 #ifdef __linux
@@ -5337,6 +5340,44 @@ static int SysPipe(struct Machine *m, i64 pipefds_addr) {
 
 #ifdef HAVE_EPOLL_PWAIT1
 
+// Host-backed fds created by blink itself (eventfd, epoll, ...) must be
+// registered with the VFS when it's enabled, whose fd numbers can differ
+// from the host's; calls that hand fds to the host need the reverse.
+static int WrapNewHostFd(int hostfd) {
+#ifndef DISABLE_VFS
+  int fd;
+  struct VfsInfo *info;
+  if (HostfsWrapFd(hostfd, false, &info) == -1) {
+    close(hostfd);
+    return -1;
+  }
+  if ((fd = VfsAddFd(info)) == -1) {
+    unassert(!VfsFreeInfo(info));
+    return -1;
+  }
+  return fd;
+#else
+  return hostfd;
+#endif
+}
+
+static int GuestFdToHost(int fd) {
+#ifndef DISABLE_VFS
+  int hostfd;
+  struct VfsInfo *info;
+  if (VfsGetFd(fd, &info) == -1) return -1;
+  if (info->device && info->device->ops == &g_hostfs.ops && info->data) {
+    hostfd = ((struct HostfsInfo *)info->data)->filefd;
+  } else {
+    hostfd = ebadf();  // not backed by a host fd, e.g. a /proc file
+  }
+  unassert(!VfsFreeInfo(info));
+  return hostfd;
+#else
+  return fd;
+#endif
+}
+
 static i32 SysEpollCreate1(struct Machine *m, i32 flags) {
   int lim, fildes, oflags, sysflags;
   oflags = 0;
@@ -5351,7 +5392,8 @@ static i32 SysEpollCreate1(struct Machine *m, i32 flags) {
     return einval();
   }
   if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
-  if ((fildes = epoll_create1(sysflags)) != -1) {
+  if ((fildes = epoll_create1(sysflags)) != -1 &&
+      (fildes = WrapNewHostFd(fildes)) != -1) {
     if (fildes >= lim) {
       close(fildes);
       fildes = emfile();
@@ -5373,7 +5415,8 @@ static i32 SysEventfd2(struct Machine *m, u32 initval, i32 flags) {
   if (flags & 1) { sysflags |= EFD_SEMAPHORE; flags &= ~1; }
   if (flags) return einval();
   if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
-  if ((fildes = eventfd(initval, sysflags)) != -1) {
+  if ((fildes = eventfd(initval, sysflags)) != -1 &&
+      (fildes = WrapNewHostFd(fildes)) != -1) {
     if (fildes >= lim) {
       close(fildes);
       fildes = emfile();
@@ -5416,6 +5459,8 @@ static i32 SysEpollCtl(struct Machine *m, i32 epfd, i32 op, i32 fd,
     default:
       return einval();
   }
+  if ((epfd = GuestFdToHost(epfd)) == -1) return -1;
+  if ((fd = GuestFdToHost(fd)) == -1) return -1;
   return epoll_ctl(epfd, op, fd, pepe);
 }
 
@@ -5430,6 +5475,7 @@ static i32 EpollPwait(struct Machine *m, i32 epfd, i64 eventsaddr,
   struct epoll_event_linux *gevents;
   const struct sigset_linux *sigmaskp_guest = 0;
   if (maxevents <= 0) return einval();
+  if ((epfd = GuestFdToHost(epfd)) == -1) return -1;
   if (sigmaskaddr) {
     if (sigsetsize != 8) return einval();
     if (!(sigmaskp_guest = (const struct sigset_linux *)SchlepR(

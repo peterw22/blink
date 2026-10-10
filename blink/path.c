@@ -554,6 +554,15 @@ bool CreatePath(P) {
     return false;
   }
   if ((pc = GetPc(m))) {
+    // Self-modifying code is only detected in linear mode, where writes to
+    // translated pages fault on the host. Without a linear mapping, never
+    // translate code from a writable page (e.g. a JavaScript JIT's RWX code
+    // heap): the interpreter always sees the current bytes. Pages that are
+    // later made writable get their translations reset by mprotect().
+    if (!HasLinearMapping()) {
+      u64 pte = FindPageTableEntry(m, pc & -4096);
+      if (!pte || (pte & PAGE_RW)) return false;
+    }
     if ((m->path.jb = StartJit(&m->system->jit, pc))) {
       JIP_LOGF("starting new path jit_pc:%" PRIxPTR " at pc:%" PRIx64,
                GetJitPc(m->path.jb), pc);

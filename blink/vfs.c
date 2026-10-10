@@ -136,14 +136,21 @@ int VfsInit(const char *prefix) {
   // Temporary cwd for syscalls to work during initialization
   unassert(!VfsChdir("/"));
 
-  // Mount the host's root.
-  if (VfsMkdir(AT_FDCWD, VFS_SYSTEM_ROOT_MOUNT, 0755) == -1 &&
-      errno != EEXIST) {
-    ERRF("Failed to create system root mount directory, %s", strerror(errno));
-    goto cleananddie;
+  // Mount the host's root, unless the guest root already is the host root
+  // (no prefix), where the extra mount point would be redundant and, being
+  // created inside the host's /, usually not even permitted.
+  if (bprefix) {
+    if (VfsMkdir(AT_FDCWD, VFS_SYSTEM_ROOT_MOUNT, 0755) == -1 &&
+        errno != EEXIST) {
+      ERRF("Failed to create system root mount directory, %s",
+           strerror(errno));
+      goto cleananddie;
+    }
+    unassert(VfsMount("/", VFS_SYSTEM_ROOT_MOUNT, "hostfs", 0, NULL) != -1);
   }
-  unassert(VfsMount("/", VFS_SYSTEM_ROOT_MOUNT, "hostfs", 0, NULL) != -1);
-  unassert(!VfsTraverse("/", &g_actualrootinfo, false));
+  unassert(!VfsFreeInfo(g_actualrootinfo));
+  unassert(!VfsTraverse(bprefix ? VFS_SYSTEM_ROOT_MOUNT : "/",
+                        &g_actualrootinfo, false));
 
   // devfs, procfs
   if (VfsMkdir(AT_FDCWD, "/dev", 0755) == -1 && errno != EEXIST) {
@@ -171,6 +178,8 @@ int VfsInit(const char *prefix) {
       }
       memcpy(cwd, hostcwd + prefixlen, hostcwdlen - prefixlen + 1);
     }
+  } else if (!bprefix) {
+    cwd = strdup(hostcwd);
   } else {
     cwd = (char *)malloc(PATH_MAX + sizeof(VFS_SYSTEM_ROOT_MOUNT));
     if (cwd == NULL) {
@@ -791,6 +800,21 @@ int VfsGetFd(int fd, struct VfsInfo **output) {
   }
   UNLOCK(&g_vfs.lock);
   return ebadf();
+}
+
+// Returns the fd number of the n-th open VFS fd in ascending order, or -1.
+int VfsNthFd(int n) {
+  int fd = -1;
+  struct Dll *e;
+  LOCK(&g_vfs.lock);
+  for (e = dll_first(g_vfs.fds); e; e = dll_next(g_vfs.fds, e)) {
+    if (!n--) {
+      fd = VFS_FD_CONTAINER(e)->fd;
+      break;
+    }
+  }
+  UNLOCK(&g_vfs.lock);
+  return fd;
 }
 
 int VfsSetFd(int fd, struct VfsInfo *data) {
