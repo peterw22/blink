@@ -1,0 +1,4 @@
+# Link Linux builds with the system GCC; ~/.local/bin/cc is a zig shim
+# targeting glibc 2.33, which lacks symbols the GCC-compiled C uses.
+[target.x86_64-unknown-linux-gnu]
+linker = "gcc"
