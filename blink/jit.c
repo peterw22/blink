@@ -574,9 +574,15 @@ static void ClearEdges(struct JitEdges *edges) {
   edges->i = 0;
 }
 
-static bool IsCyclic(struct JitEdges *edges, i64 V[kJitDepth], int d, i64 dst) {
+// The search is exhaustive over paths rather than nodes, so in a densely
+// connected edge graph it's exponential. Answering "cyclic" is always safe
+// (the caller just won't link the two jit paths), so bound the work.
+#define kJitCycleBudget 4096
+
+static bool IsCyclic(struct JitEdges *edges, i64 V[kJitDepth], int d, i64 dst,
+                     int *budget) {
   int i, s;
-  if (d == kJitDepth) {
+  if (d == kJitDepth || --*budget <= 0) {
     return true;
   }
   for (i = 0; i < d; ++i) {
@@ -587,7 +593,7 @@ static bool IsCyclic(struct JitEdges *edges, i64 V[kJitDepth], int d, i64 dst) {
   V[d++] = dst;
   if (edges->dst[(s = GetEdge(edges, dst))]) {
     for (i = 0; i < edges->dst[s]->i; ++i) {
-      if (IsCyclic(edges, V, d, edges->dst[s]->p[i])) {
+      if (IsCyclic(edges, V, d, edges->dst[s]->p[i], budget)) {
         return true;
       }
     }
@@ -687,6 +693,7 @@ static void ReleaseJitBlock(struct JitBlock *jb) {
   jb->committed = 0;
   jb->wasretired = false;
   jb->isprotected = false;
+  jb->isleased = false;
   dll_init(&jb->aged);
   LOCK(&g_jit.lock);
   dll_make_first(&g_jit.freeblocks, &jb->elem);
@@ -1237,7 +1244,10 @@ static void ForceJitBlocksToRetire(struct Jit *jit) {
   for (e = dll_first(jit->agedblocks); e; e = e2) {
     e2 = dll_next(jit->agedblocks, e);
     jb = AGEDBLOCK_CONTAINER(e);
-    if (!jb->isprotected) {
+    // never retire a block another thread is still writing code into:
+    // that would reset its cursor and hand the same memory to two
+    // threads at once, leading to code running off the end of blocks
+    if (!jb->isprotected && !jb->isleased) {
       JIT_LOGF("forcing jit block %p to retire", jb);
       RetireJitBlock(jit, jb);
     }
@@ -1340,6 +1350,7 @@ struct JitBlock *StartJit(struct Jit *jit, i64 opt_virt) {
       }
     }
     if (jb) {
+      jb->isleased = true;
       dll_make_first(&jb->freejumps, jit->freejumps);
       jit->freejumps = 0;
     }
@@ -1526,6 +1537,7 @@ int CommitJit_(struct Jit *jit, struct JitBlock *jb) {
 void ReinsertJitBlock_(struct Jit *jit, struct JitBlock *jb) {
   unassert(jb->start == jb->index);
   unassert(dll_is_empty(jb->jumps));
+  jb->isleased = false;
   if (jb->index < kJitBlockSize) {
     // there's still memory remaining; reinsert for immediate reuse.
     dll_make_first(&jit->blocks, &jb->elem);
@@ -1592,9 +1604,10 @@ bool RecordJitJump(struct JitBlock *jb, u64 virt, int addend) {
 // @assume jit->lock
 static bool RecordJitEdgeImpl(struct Jit *jit, i64 src, i64 dst) {
   i64 visits[kJitDepth];
+  int budget = kJitCycleBudget;
   if (src == dst) return false;
   visits[0] = src;
-  if (IsCyclic(&jit->edges, visits, 1, dst)) {
+  if (IsCyclic(&jit->edges, visits, 1, dst, &budget)) {
     STATISTIC(++jit_cycles_avoided);
     return false;
   }

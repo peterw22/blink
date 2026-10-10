@@ -36,6 +36,25 @@
 #define kOpCvt0f5b  16
 #define kOpCvt0fE6  20
 
+// x86 float->int conversions return the "integer indefinite" value
+// (the most negative integer) for NaN and out-of-range inputs, which
+// JITs like JavaScriptCore rely on; a plain C cast is undefined there.
+static i32 ToInt32(double x) {
+  if (!(x > -2147483649. && x < 2147483648.)) return INT32_MIN;
+  return x;
+}
+
+static i64 ToInt64(double x) {
+  if (!(x >= -9223372036854775808. && x < 9223372036854775808.)) {
+    return INT64_MIN;
+  }
+  return x;
+}
+
+static i64 ToGdqp(u64 rde, double x) {
+  return Rexw(rde) ? ToInt64(x) : (u32)ToInt32(x);
+}
+
 static double SseRoundDouble(struct Machine *m, double x) {
   switch ((m->mxcsr & kMxcsrRc) >> 13) {
     case 0:
@@ -55,8 +74,7 @@ static void OpGdqpWssCvttss2si(P) {
   i64 n;
   union FloatPun f;
   f.i = Read32(GetModrmRegisterXmmPointerRead4(A));
-  n = f.f;
-  if (!Rexw(rde)) n &= 0xffffffff;
+  n = ToGdqp(rde, f.f);
   Put64(RegRexrReg(m, rde), n);
 }
 
@@ -64,8 +82,7 @@ static void OpGdqpWsdCvttsd2si(P) {
   i64 n;
   union DoublePun d;
   d.i = Read64(GetModrmRegisterXmmPointerRead8(A));
-  n = d.f;
-  if (!Rexw(rde)) n &= 0xffffffff;
+  n = ToGdqp(rde, d.f);
   Put64(RegRexrReg(m, rde), n);
 }
 
@@ -73,8 +90,7 @@ static void OpGdqpWssCvtss2si(P) {
   i64 n;
   union FloatPun f;
   f.i = Read32(GetModrmRegisterXmmPointerRead4(A));
-  n = rintf(f.f);
-  if (!Rexw(rde)) n &= 0xffffffff;
+  n = ToGdqp(rde, SseRoundDouble(m, f.f));
   Put64(RegRexrReg(m, rde), n);
 }
 
@@ -82,8 +98,7 @@ static void OpGdqpWsdCvtsd2si(P) {
   i64 n;
   union DoublePun d;
   d.i = Read64(GetModrmRegisterXmmPointerRead8(A));
-  n = SseRoundDouble(m, d.f);
-  if (!Rexw(rde)) n &= 0xffffffff;
+  n = ToGdqp(rde, SseRoundDouble(m, d.f));
   Put64(RegRexrReg(m, rde), n);
 }
 
@@ -183,16 +198,16 @@ static void OpPpiWpsqCvtps2pi(P) {
   f[1].i = Read32(p + 1 * 4);
   switch ((m->mxcsr & kMxcsrRc) >> 13) {
     case 0:
-      for (i = 0; i < 2; ++i) n[i] = rintf(f[i].f);
+      for (i = 0; i < 2; ++i) n[i] = ToInt32(rintf(f[i].f));
       break;
     case 1:
-      for (i = 0; i < 2; ++i) n[i] = floorf(f[i].f);
+      for (i = 0; i < 2; ++i) n[i] = ToInt32(floorf(f[i].f));
       break;
     case 2:
-      for (i = 0; i < 2; ++i) n[i] = ceilf(f[i].f);
+      for (i = 0; i < 2; ++i) n[i] = ToInt32(ceilf(f[i].f));
       break;
     case 3:
-      for (i = 0; i < 2; ++i) n[i] = truncf(f[i].f);
+      for (i = 0; i < 2; ++i) n[i] = ToInt32(truncf(f[i].f));
       break;
     default:
       __builtin_unreachable();
@@ -208,8 +223,8 @@ static void OpPpiWpsqCvttps2pi(P) {
   p = GetModrmRegisterXmmPointerRead8(A);
   f[0].i = Read32(p + 0);
   f[1].i = Read32(p + 4);
-  n[0] = f[0].f;
-  n[1] = f[1].f;
+  n[0] = ToInt32(f[0].f);
+  n[1] = ToInt32(f[1].f);
   Put32(MmReg(m, rde) + 0, n[0]);
   Put32(MmReg(m, rde) + 4, n[1]);
 }
@@ -222,7 +237,7 @@ static void OpPpiWpdCvtpd2pi(P) {
   p = GetModrmRegisterXmmPointerRead16(A);
   d[0].i = Read64(p + 0);
   d[1].i = Read64(p + 8);
-  for (i = 0; i < 2; ++i) n[i] = SseRoundDouble(m, d[i].f);
+  for (i = 0; i < 2; ++i) n[i] = ToInt32(SseRoundDouble(m, d[i].f));
   Put32(MmReg(m, rde) + 0, n[0]);
   Put32(MmReg(m, rde) + 4, n[1]);
 }
@@ -234,8 +249,8 @@ static void OpPpiWpdCvttpd2pi(P) {
   p = GetModrmRegisterXmmPointerRead16(A);
   d[0].i = Read64(p + 0);
   d[1].i = Read64(p + 8);
-  n[0] = d[0].f;
-  n[1] = d[1].f;
+  n[0] = ToInt32(d[0].f);
+  n[1] = ToInt32(d[1].f);
   Put32(MmReg(m, rde) + 0, n[0]);
   Put32(MmReg(m, rde) + 4, n[1]);
 }
@@ -264,6 +279,7 @@ static void OpVpsWpdCvtpd2ps(P) {
   f[1].f = d[1].f;
   Put32(XmmRexrReg(m, rde) + 0, f[0].i);
   Put32(XmmRexrReg(m, rde) + 4, f[1].i);
+  Put64(XmmRexrReg(m, rde) + 8, 0);
 }
 
 static void OpVssWsdCvtsd2ss(P) {
@@ -323,10 +339,10 @@ static void OpVdqWpsCvttps2dq(P) {
   f[1].i = Read32(p + 1 * 4);
   f[2].i = Read32(p + 2 * 4);
   f[3].i = Read32(p + 3 * 4);
-  n[0] = f[0].f;
-  n[1] = f[1].f;
-  n[2] = f[2].f;
-  n[3] = f[3].f;
+  n[0] = ToInt32(f[0].f);
+  n[1] = ToInt32(f[1].f);
+  n[2] = ToInt32(f[2].f);
+  n[3] = ToInt32(f[3].f);
   Put32(XmmRexrReg(m, rde) + 0 * 4, n[0]);
   Put32(XmmRexrReg(m, rde) + 1 * 4, n[1]);
   Put32(XmmRexrReg(m, rde) + 2 * 4, n[2]);
@@ -345,16 +361,16 @@ static void OpVdqWpsCvtps2dq(P) {
   f[3].i = Read32(p + 3 * 4);
   switch ((m->mxcsr & kMxcsrRc) >> 13) {
     case 0:
-      for (i = 0; i < 4; ++i) n[i] = rintf(f[i].f);
+      for (i = 0; i < 4; ++i) n[i] = ToInt32(rintf(f[i].f));
       break;
     case 1:
-      for (i = 0; i < 4; ++i) n[i] = floorf(f[i].f);
+      for (i = 0; i < 4; ++i) n[i] = ToInt32(floorf(f[i].f));
       break;
     case 2:
-      for (i = 0; i < 4; ++i) n[i] = ceilf(f[i].f);
+      for (i = 0; i < 4; ++i) n[i] = ToInt32(ceilf(f[i].f));
       break;
     case 3:
-      for (i = 0; i < 4; ++i) n[i] = truncf(f[i].f);
+      for (i = 0; i < 4; ++i) n[i] = ToInt32(truncf(f[i].f));
       break;
     default:
       __builtin_unreachable();
@@ -372,10 +388,11 @@ static void OpVdqWpdCvttpd2dq(P) {
   p = GetModrmRegisterXmmPointerRead16(A);
   d[0].i = Read64(p + 0);
   d[1].i = Read64(p + 8);
-  n[0] = d[0].f;
-  n[1] = d[1].f;
+  n[0] = ToInt32(d[0].f);
+  n[1] = ToInt32(d[1].f);
   Put32(XmmRexrReg(m, rde) + 0, n[0]);
   Put32(XmmRexrReg(m, rde) + 4, n[1]);
+  Put64(XmmRexrReg(m, rde) + 8, 0);
 }
 
 static void OpVdqWpdCvtpd2dq(P) {
@@ -386,9 +403,10 @@ static void OpVdqWpdCvtpd2dq(P) {
   p = GetModrmRegisterXmmPointerRead16(A);
   d[0].i = Read64(p + 0);
   d[1].i = Read64(p + 8);
-  for (i = 0; i < 2; ++i) n[i] = SseRoundDouble(m, d[i].f);
+  for (i = 0; i < 2; ++i) n[i] = ToInt32(SseRoundDouble(m, d[i].f));
   Put32(XmmRexrReg(m, rde) + 0, n[0]);
   Put32(XmmRexrReg(m, rde) + 4, n[1]);
+  Put64(XmmRexrReg(m, rde) + 8, 0);
 }
 
 static void OpCvt(P, unsigned long op) {
@@ -451,11 +469,11 @@ static void OpCvt(P, unsigned long op) {
     case kOpCvt0f5b + 3:
       OpVdqWpsCvttps2dq(A);
       break;
-    case kOpCvt0fE6 + 1:
-      OpVdqWpdCvtpd2dq(A);
-      break;
-    case kOpCvt0fE6 + 2:
+    case kOpCvt0fE6 + 1:  // 66 0F E6
       OpVdqWpdCvttpd2dq(A);
+      break;
+    case kOpCvt0fE6 + 2:  // F2 0F E6
+      OpVdqWpdCvtpd2dq(A);
       break;
     case kOpCvt0fE6 + 3:
       OpVpdWdqCvtdq2pd(A);

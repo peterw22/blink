@@ -1046,28 +1046,8 @@ static u64 AluPopcnt(u64 x, struct Machine *m) {
   return popcount(x);
 }
 
-static u64 AluLzcnt(u64 x, struct Machine *m, int bits) {
-  u64 r = x ? bsf(x) : bits;
-  m->flags = SetFlag(m->flags, FLAGS_CF, !x);
-  m->flags = SetFlag(m->flags, FLAGS_ZF, !r);
-  return r;
-}
-static u64 AluLzcnt64(u64 x, struct Machine *m) {
-  return AluLzcnt(x, m, 64);
-}
-static u64 AluLzcnt32(u64 x, struct Machine *m) {
-  return AluLzcnt(x, m, 32);
-}
-static u64 AluLzcnt16(u64 x, struct Machine *m) {
-  return AluLzcnt(x, m, 16);
-}
-static u64 AluBsf(u64 x, struct Machine *m) {
-  m->flags = SetFlag(m->flags, FLAGS_ZF, !x);
-  return x ? bsf(x) : 0;
-}
-
 static u64 AluTzcnt(u64 x, struct Machine *m, int bits) {
-  u64 r = x ? bsr(x) : bits;
+  u64 r = x ? bsf(x) : bits;
   m->flags = SetFlag(m->flags, FLAGS_CF, !x);
   m->flags = SetFlag(m->flags, FLAGS_ZF, !r);
   return r;
@@ -1080,6 +1060,26 @@ static u64 AluTzcnt32(u64 x, struct Machine *m) {
 }
 static u64 AluTzcnt16(u64 x, struct Machine *m) {
   return AluTzcnt(x, m, 16);
+}
+static u64 AluBsf(u64 x, struct Machine *m) {
+  m->flags = SetFlag(m->flags, FLAGS_ZF, !x);
+  return x ? bsf(x) : 0;
+}
+
+static u64 AluLzcnt(u64 x, struct Machine *m, int bits) {
+  u64 r = x ? bits - 1 - bsr(x) : bits;
+  m->flags = SetFlag(m->flags, FLAGS_CF, !x);
+  m->flags = SetFlag(m->flags, FLAGS_ZF, !r);
+  return r;
+}
+static u64 AluLzcnt64(u64 x, struct Machine *m) {
+  return AluLzcnt(x, m, 64);
+}
+static u64 AluLzcnt32(u64 x, struct Machine *m) {
+  return AluLzcnt(x, m, 32);
+}
+static u64 AluLzcnt16(u64 x, struct Machine *m) {
+  return AluLzcnt(x, m, 16);
 }
 static u64 AluBsr(u64 x, struct Machine *m) {
   m->flags = SetFlag(m->flags, FLAGS_ZF, !x);
@@ -1101,23 +1101,16 @@ static void Bitscan(P, u64 op(u64, struct Machine *)) {
   }
 }
 
-static void OpBsf(P) {
-  u64 (*op)(u64, struct Machine *);
-  if (Rep(rde) == 3) {
-    if (Rexw(rde)) {
-      op = AluLzcnt64;
-    } else if (!Osz(rde)) {
-      op = AluLzcnt32;
-    } else {
-      op = AluLzcnt16;
-    }
+static void BitscanZeroKeeps(P, u64 op(u64, struct Machine *)) {
+  u64 x = ReadMemory(rde, GetModrmRegisterWordPointerReadOszRexw(A));
+  if (x) {
+    WriteRegister(rde, RegRexrReg(m, rde), op(x, m));
   } else {
-    op = AluBsf;
+    m->flags = SetFlag(m->flags, FLAGS_ZF, true);
   }
-  Bitscan(A, op);
 }
 
-static void OpBsr(P) {
+static void OpBsf(P) {
   u64 (*op)(u64, struct Machine *);
   if (Rep(rde) == 3) {
     if (Rexw(rde)) {
@@ -1128,7 +1121,25 @@ static void OpBsr(P) {
       op = AluTzcnt16;
     }
   } else {
-    op = AluBsr;
+    BitscanZeroKeeps(A, AluBsf);
+    return;
+  }
+  Bitscan(A, op);
+}
+
+static void OpBsr(P) {
+  u64 (*op)(u64, struct Machine *);
+  if (Rep(rde) == 3) {
+    if (Rexw(rde)) {
+      op = AluLzcnt64;
+    } else if (!Osz(rde)) {
+      op = AluLzcnt32;
+    } else {
+      op = AluLzcnt16;
+    }
+  } else {
+    BitscanZeroKeeps(A, AluBsr);
+    return;
   }
   Bitscan(A, op);
 }
@@ -2076,6 +2087,56 @@ nexgen32e_f GetOp(long op) {
       XLAT(0x21e, OpSsePabsd);
       XLAT(0x22a, OpMovntdqaVdqMdq);
       XLAT(0x240, OpSsePmulld);
+      XLAT(0x210, OpSse4);
+      XLAT(0x214, OpSse4);
+      XLAT(0x215, OpSse4);
+      XLAT(0x217, OpSse4);
+      XLAT(0x220, OpSse4);
+      XLAT(0x221, OpSse4);
+      XLAT(0x222, OpSse4);
+      XLAT(0x223, OpSse4);
+      XLAT(0x224, OpSse4);
+      XLAT(0x225, OpSse4);
+      XLAT(0x228, OpSse4);
+      XLAT(0x229, OpSse4);
+      XLAT(0x22b, OpSse4);
+      XLAT(0x230, OpSse4);
+      XLAT(0x231, OpSse4);
+      XLAT(0x232, OpSse4);
+      XLAT(0x233, OpSse4);
+      XLAT(0x234, OpSse4);
+      XLAT(0x235, OpSse4);
+      XLAT(0x237, OpSse4);
+      XLAT(0x238, OpSse4);
+      XLAT(0x239, OpSse4);
+      XLAT(0x23a, OpSse4);
+      XLAT(0x23b, OpSse4);
+      XLAT(0x23c, OpSse4);
+      XLAT(0x23d, OpSse4);
+      XLAT(0x23e, OpSse4);
+      XLAT(0x23f, OpSse4);
+      XLAT(0x241, OpSse4);
+      XLAT(0x308, OpSse4);
+      XLAT(0x309, OpSse4);
+      XLAT(0x30a, OpSse4);
+      XLAT(0x30b, OpSse4);
+      XLAT(0x30c, OpSse4);
+      XLAT(0x30d, OpSse4);
+      XLAT(0x30e, OpSse4);
+      XLAT(0x314, OpSse4);
+      XLAT(0x315, OpSse4);
+      XLAT(0x316, OpSse4);
+      XLAT(0x317, OpSse4);
+      XLAT(0x320, OpSse4);
+      XLAT(0x321, OpSse4);
+      XLAT(0x322, OpSse4);
+      XLAT(0x340, OpSse4);
+      XLAT(0x341, OpSse4);
+      XLAT(0x342, OpSse4);
+      XLAT(0x360, OpSse4);
+      XLAT(0x361, OpSse4);
+      XLAT(0x362, OpSse4);
+      XLAT(0x363, OpSse4);
       XLAT(0x2f0, Op2f01);
       XLAT(0x2f1, Op2f01);
       XLAT(0x2f5, Op2f5);

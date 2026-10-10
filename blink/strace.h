@@ -132,12 +132,12 @@
 #define STRACE_READV        BLOCKY  SSIZE_ FD         O_IOVEC    BUFSZ     UN        UN       UN
 #define STRACE_PREAD        BLOCKY  SSIZE_ FD         O_BUF      BUFSZ     OFF       UN       UN
 #define STRACE_PREADV       BLOCKY  SSIZE_ FD         O_IOVEC    BUFSZ     OFF       UN       UN
-#define STRACE_PREADV2      BLOCKY  SSIZE_ FD         O_IOVEC    BUFSZ     OFF       I32      UN
+#define STRACE_PREADV2      BLOCKY  SSIZE_ FD         O_IOVEC    BUFSZ     OFF       HEX      I32
 #define STRACE_WRITE        CANCPT  SSIZE_ FD         I_BUF      BUFSZ     UN        UN       UN
 #define STRACE_WRITEV       CANCPT  SSIZE_ FD         I_IOVEC    BUFSZ     UN        UN       UN
 #define STRACE_PWRITE       CANCPT  SSIZE_ FD         I_BUF      BUFSZ     OFF       UN       UN
 #define STRACE_PWRITEV      CANCPT  SSIZE_ FD         I_IOVEC    BUFSZ     OFF       UN       UN
-#define STRACE_PWRITEV2     CANCPT  SSIZE_ FD         I_IOVEC    BUFSZ     OFF       I32      UN
+#define STRACE_PWRITEV2     CANCPT  SSIZE_ FD         I_IOVEC    BUFSZ     OFF       HEX      I32
 #define STRACE_OPEN         CANCPT  I32    PATH       OFLAGS     MODE      UN        UN       UN
 #define STRACE_OPENAT       CANCPT  I32    DIRFD      STR        OFLAGS    MODE      UN       UN
 #define STRACE_CREAT        CANCPT  I32    PATH       MODE       UN        UN        UN       UN

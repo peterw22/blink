@@ -4,6 +4,6 @@
 int main(int argc, char *argv[]) {
   epoll_create(-1);
   epoll_create1(-1);
-  epoll_pwait(-1, 0, 0, 0, 0);
+  struct epoll_event e; epoll_pwait(-1, &e, 0, 0, 0);
   return 0;
 }

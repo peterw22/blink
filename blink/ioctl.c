@@ -90,6 +90,65 @@ static int IoctlTcsets(struct Machine *m, int fd, int request, i64 addr,
   return fn(fd, request, &tio);
 }
 
+// struct termios2: newer glibc (2.42+) implements tcgetattr() and
+// tcsetattr() with these, so isatty() fails unless we support them
+struct termios2_linux {
+  struct termios_linux t;
+  u8 ispeed[4];
+  u8 ospeed[4];
+};
+
+#define TCGETS2_LINUX  0x802c542a
+#define TCSETS2_LINUX  0x402c542b
+#define TCSETSW2_LINUX 0x402c542c
+#define TCSETSF2_LINUX 0x402c542d
+
+static u32 BaudToNumber(speed_t b) {
+  static const struct {
+    speed_t b;
+    u32 n;
+  } kBauds[] = {
+      {B0, 0},           {B50, 50},         {B75, 75},
+      {B110, 110},       {B134, 134},       {B150, 150},
+      {B200, 200},       {B300, 300},       {B600, 600},
+      {B1200, 1200},     {B1800, 1800},     {B2400, 2400},
+      {B4800, 4800},     {B9600, 9600},     {B19200, 19200},
+      {B38400, 38400},   {B57600, 57600},   {B115200, 115200},
+      {B230400, 230400},
+  };
+  size_t i;
+  for (i = 0; i < ARRAYLEN(kBauds); ++i) {
+    if (kBauds[i].b == b) return kBauds[i].n;
+  }
+  return b;  // hosts whose speed_t is already numeric
+}
+
+static int IoctlTcgets2(struct Machine *m, int fd, i64 addr,
+                        int fn(int, struct termios *)) {
+  int rc;
+  struct termios tio;
+  struct termios2_linux gtio;
+  if ((rc = fn(fd, &tio)) != -1) {
+    memset(&gtio, 0, sizeof(gtio));
+    XlatTermiosToLinux(&gtio.t, &tio);
+    Write32(gtio.ispeed, BaudToNumber(cfgetispeed(&tio)));
+    Write32(gtio.ospeed, BaudToNumber(cfgetospeed(&tio)));
+    if (CopyToUserWrite(m, addr, &gtio, sizeof(gtio)) == -1) rc = -1;
+  }
+  return rc;
+}
+
+static int IoctlTcsets2(struct Machine *m, int fd, int request, i64 addr,
+                        int fn(int, int, const struct termios *)) {
+  struct termios tio;
+  struct termios2_linux gtio;
+  if (CopyFromUserRead(m, &gtio, addr, sizeof(gtio)) == -1) return -1;
+  // the speed is also encoded in c_cflag, unless it's BOTHER (arbitrary
+  // baud rate) which we don't support; leave the host's speed alone then
+  XlatLinuxToTermios(&tio, &gtio.t);
+  return fn(fd, request, &tio);
+}
+
 static int IoctlTiocgpgrp(struct Machine *m, int fd, i64 addr) {
   int rc;
   u8 *pgrp;
@@ -332,6 +391,14 @@ int SysIoctl(struct Machine *m, int fildes, u64 request, i64 addr) {
       return IoctlTcsets(m, fildes, TCSADRAIN, addr, tcsetattr_impl);
     case TCSETSF_LINUX:
       return IoctlTcsets(m, fildes, TCSAFLUSH, addr, tcsetattr_impl);
+    case TCGETS2_LINUX:
+      return IoctlTcgets2(m, fildes, addr, tcgetattr_impl);
+    case TCSETS2_LINUX:
+      return IoctlTcsets2(m, fildes, TCSANOW, addr, tcsetattr_impl);
+    case TCSETSW2_LINUX:
+      return IoctlTcsets2(m, fildes, TCSADRAIN, addr, tcsetattr_impl);
+    case TCSETSF2_LINUX:
+      return IoctlTcsets2(m, fildes, TCSAFLUSH, addr, tcsetattr_impl);
     case TIOCGPGRP_LINUX:
       return IoctlTiocgpgrp(m, fildes, addr);
     case TIOCSPGRP_LINUX:
@@ -365,6 +432,18 @@ int SysIoctl(struct Machine *m, int fildes, u64 request, i64 addr) {
 #ifdef TIOCOUTQ
     case TIOCOUTQ_LINUX:
       return IoctlGetInt32(m, fildes, TIOCOUTQ, addr);
+#endif
+#ifdef TIOCSCTTY
+    case 0x540E:  // TIOCSCTTY: make this tty our controlling terminal
+      return ioctl(fildes, TIOCSCTTY, (int)addr);
+#endif
+#ifdef TIOCGPTN
+    case TIOCGPTN_LINUX:  // ptsname(): which /dev/pts/N is our slave
+      return IoctlGetInt32(m, fildes, TIOCGPTN, addr);
+#endif
+#ifdef TIOCSPTLCK
+    case TIOCSPTLCK_LINUX:  // unlockpt()
+      return IoctlSetInt32(m, fildes, TIOCSPTLCK, addr);
 #endif
 #ifdef TIOCSTI
     case TIOCSTI_LINUX:
@@ -404,6 +483,8 @@ int SysIoctl(struct Machine *m, int fildes, u64 request, i64 addr) {
 #endif /* HAVE_SIOCGIFCONF */
     default:
       LOGF("missing ioctl %#" PRIx64, request);
-      return einval();
+      // what linux says when a device doesn't support a request
+      errno = ENOTTY;
+      return -1;
   }
 }

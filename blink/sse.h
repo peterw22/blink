@@ -46,6 +46,7 @@ void OpSsePmulhrsw(P);
 void OpSsePmulhuw(P);
 void OpSsePmulhw(P);
 void OpSsePmulld(P);
+void OpSse4(P);
 void OpSsePmullw(P);
 void OpSsePmuludq(P);
 void OpSsePor(P);

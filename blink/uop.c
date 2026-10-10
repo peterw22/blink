@@ -1179,18 +1179,24 @@ MICRO_OP static i64 FastAnd32(struct Machine *m, u64 x, u64 y) {
   return z;
 }
 MICRO_OP static i64 FastSub32(struct Machine *m, u64 x, u64 y) {
+  x = (u32)x;
+  y = (u32)y;
   u32 z = x - y;
   int c = x < z;
   m->flags = (m->flags & ~(CF | ZF)) | c << FLAGS_CF | !z << FLAGS_ZF;
   return z;
 }
 MICRO_OP static i64 FastAdd32(struct Machine *m, u64 x, u64 y) {
+  x = (u32)x;
+  y = (u32)y;
   u32 z = x + y;
   int c = z < y;
   m->flags = (m->flags & ~(CF | ZF)) | c << FLAGS_CF | !z << FLAGS_ZF;
   return z;
 }
 MICRO_OP static i64 FastAdc32(struct Machine *m, u64 x, u64 y) {
+  x = (u32)x;
+  y = (u32)y;
   u32 t = x + !!(m->flags & CF);
   u32 z = t + y;
   int c = (t < x) | (z < y);
@@ -1198,6 +1204,8 @@ MICRO_OP static i64 FastAdc32(struct Machine *m, u64 x, u64 y) {
   return z;
 }
 MICRO_OP static i64 FastSbb32(struct Machine *m, u64 x, u64 y) {
+  x = (u32)x;
+  y = (u32)y;
   u32 t = x - !!(m->flags & CF);
   u32 z = t - y;
   int c = (x < t) | (t < z);
@@ -1221,18 +1229,24 @@ MICRO_OP static i64 FastAnd16(struct Machine *m, u64 x, u64 y) {
   return z;
 }
 MICRO_OP static i64 FastSub16(struct Machine *m, u64 x, u64 y) {
+  x = (u16)x;
+  y = (u16)y;
   u16 z = x - y;
   int c = x < z;
   m->flags = (m->flags & ~(CF | ZF)) | c << FLAGS_CF | !z << FLAGS_ZF;
   return z;
 }
 MICRO_OP static i64 FastAdd16(struct Machine *m, u64 x, u64 y) {
+  x = (u16)x;
+  y = (u16)y;
   u16 z = x + y;
   int c = z < y;
   m->flags = (m->flags & ~(CF | ZF)) | c << FLAGS_CF | !z << FLAGS_ZF;
   return z;
 }
 MICRO_OP static i64 FastAdc16(struct Machine *m, u64 x, u64 y) {
+  x = (u16)x;
+  y = (u16)y;
   u16 t = x + !!(m->flags & CF);
   u16 z = t + y;
   int c = (t < x) | (z < y);
@@ -1240,6 +1254,8 @@ MICRO_OP static i64 FastAdc16(struct Machine *m, u64 x, u64 y) {
   return z;
 }
 MICRO_OP static i64 FastSbb16(struct Machine *m, u64 x, u64 y) {
+  x = (u16)x;
+  y = (u16)y;
   u16 t = x - !!(m->flags & CF);
   u16 z = t - y;
   int c = (x < t) | (t < z);
@@ -1263,18 +1279,24 @@ MICRO_OP i64 FastAnd8(struct Machine *m, u64 x, u64 y) {
   return z;
 }
 MICRO_OP i64 FastSub8(struct Machine *m, u64 x, u64 y) {
+  x = (u8)x;
+  y = (u8)y;
   u8 z = x - y;
   int c = x < z;
   m->flags = (m->flags & ~(CF | ZF)) | c << FLAGS_CF | !z << FLAGS_ZF;
   return z;
 }
 MICRO_OP static i64 FastAdd8(struct Machine *m, u64 x, u64 y) {
+  x = (u8)x;
+  y = (u8)y;
   u8 z = x + y;
   int c = z < y;
   m->flags = (m->flags & ~(CF | ZF)) | c << FLAGS_CF | !z << FLAGS_ZF;
   return z;
 }
 MICRO_OP static i64 FastAdc8(struct Machine *m, u64 x, u64 y) {
+  x = (u8)x;
+  y = (u8)y;
   u8 t = x + !!(m->flags & CF);
   u8 z = t + y;
   int c = (t < x) | (z < y);
@@ -1282,6 +1304,8 @@ MICRO_OP static i64 FastAdc8(struct Machine *m, u64 x, u64 y) {
   return z;
 }
 MICRO_OP static i64 FastSbb8(struct Machine *m, u64 x, u64 y) {
+  x = (u8)x;
+  y = (u8)y;
   u8 t = x - !!(m->flags & CF);
   u8 z = t - y;
   int c = (x < t) | (t < z);

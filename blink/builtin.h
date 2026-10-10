@@ -61,7 +61,8 @@
   }
 #endif
 
-#if !(defined(__GNUC__) && (__GNUC__ > 2) && defined(__OPTIMIZE__))
+#if !((defined(__GNUC__) && (__GNUC__ > 2) || defined(__clang__)) && \
+      defined(__OPTIMIZE__))
 #define __builtin_expect(x, y) (x)
 #endif
 

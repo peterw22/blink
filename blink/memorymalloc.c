@@ -1142,6 +1142,76 @@ bool IsFullyMapped(struct System *s, i64 virt, i64 size) {
   }
 }
 
+static void FlushDiscard(i64 *a, i64 *b) {
+  if (*a < *b) {
+    unassert(!madvise(ToHost(*a), *b - *a, MADV_DONTNEED));
+  }
+  *a = *b = 0;
+}
+
+// Implements madvise(MADV_DONTNEED): afterwards, private anonymous pages
+// read back as zeroes. The caller must hold mmap_lock and have checked
+// that [virt,virt+size) is fully mapped and 4096-byte aligned.
+void DiscardVirtual(struct System *s, i64 virt, i64 size) {
+  u8 *mi;
+  u64 pt;
+  i64 ti, end, level, ra = 0, rb = 0;
+  long pagesize = FLAG_pagesize;
+  bool code = false;
+  for (end = virt + size; virt < end;) {
+    for (pt = s->cr3, level = 39; level >= 12; level -= 9) {
+      ti = (virt >> level) & 511;
+      mi = GetPageAddress(s, pt, level == 39) + ti * 8;
+      pt = LoadPte(mi);
+      if (level > 12) continue;
+      for (;;) {
+        unassert(pt & PAGE_V);
+        if (!(pt & PAGE_RSRV)) {
+#ifndef DISABLE_JIT
+          if (!(pt & PAGE_XD) && !IsJitDisabled(&s->jit)) {
+            ResetJitPage(&s->jit, virt);
+          }
+#endif
+          if (!(pt & PAGE_XD)) code = true;
+          switch (pt & (PAGE_HOST | PAGE_MAP | PAGE_MUG)) {
+            case PAGE_HOST | PAGE_MAP:  // linear host mapping
+              if (pagesize == 4096 && rb == virt) {
+                rb += 4096;
+              } else if (pagesize == 4096) {
+                FlushDiscard(&ra, &rb);
+                ra = virt;
+                rb = virt + 4096;
+              } else if (!(pt & PAGE_FILE) && (pt & PAGE_RW)) {
+                memset(ToHost(virt), 0, 4096);
+              }
+              break;
+            case PAGE_HOST:  // page from blink's anonymous memory pool
+              if (!(pt & PAGE_FILE)) ClearPage(FindHostPage(pt));
+              break;
+            case PAGE_HOST | PAGE_MAP | PAGE_MUG:  // individually mapped
+              if (pagesize == 4096) {
+                unassert(!madvise(FindHostPage(pt), 4096, MADV_DONTNEED));
+              }
+              break;
+            default:
+              break;
+          }
+        }
+        if ((virt += 4096) >= end) {
+          FlushDiscard(&ra, &rb);
+          // other threads may have cached translations of the old bytes
+          InvalidateSystem(s, true, code);
+          return;
+        }
+        if (++ti == 512) break;
+        pt = LoadPte((mi += 8));
+      }
+    }
+  }
+  FlushDiscard(&ra, &rb);
+  InvalidateSystem(s, true, code);
+}
+
 bool IsFullyUnmapped(struct System *s, i64 virt, i64 size) {
   u8 *mi;
   i64 end;
@@ -1404,6 +1474,20 @@ static i64 FindGuestAddr(struct System *s, uintptr_t hp, u64 pt, long lvl,
   return -1;
 }
 
+// Returns the page table entry for a guest virtual address, or 0.
+// @asyncsignalsafe
+static u64 LookupGuestPte(struct System *s, i64 virt) {
+  u8 *mi;
+  u64 pt;
+  long level;
+  for (pt = s->cr3, level = 39; level >= 12; level -= 9) {
+    if (!(mi = GetPageAddress(s, pt, level == 39))) return 0;
+    pt = LoadPte(mi + ((virt >> level) & 511) * 8);
+    if (!(pt & PAGE_V)) return 0;
+  }
+  return pt;
+}
+
 // Reverse maps real host address to virtual guest address if exists.
 // On failure the host address is returned and zero is stored in pte.
 // @asyncsignalsafe
@@ -1416,7 +1500,14 @@ i64 ConvertHostToGuestAddress(struct System *s, void *ha, u64 *out_pte) {
     return (uintptr_t)ha;
   }
   if ((uintptr_t)ha < kNullSize) return (uintptr_t)ha;
-  if (HasLinearMapping() && !out_pte) return ToGuest(ha);
+  if (HasLinearMapping()) {
+    // in linear mode the guest address is a fixed offset from the host
+    // address, so a single page table walk suffices; scanning the whole
+    // page table is very slow in big address spaces (e.g. JavaScriptCore)
+    i64 g = ToGuest(ha);
+    if (out_pte) *out_pte = LookupGuestPte(s, g);
+    return g;
+  }
   base = (uintptr_t)ha & -4096;
   if ((g48 = FindGuestAddr(s, base, s->cr3, 1, out_pte)) != -1) {
     return ((i64)((u64)g48 << 16) >> 16) | ((uintptr_t)ha & 4095);

@@ -548,6 +548,7 @@ int SyncVirtual(struct System *, i64, i64, int);
 int ProtectVirtual(struct System *, i64, i64, int, bool);
 bool IsFullyMapped(struct System *, i64, i64);
 bool IsFullyUnmapped(struct System *, i64, i64);
+void DiscardVirtual(struct System *, i64, i64);
 int GetProtection(u64);
 u64 SetProtection(int);
 int ClassifyOp(u64) pureconst;

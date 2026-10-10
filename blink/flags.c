@@ -54,7 +54,8 @@ void ImportFlags(struct Machine *m, u64 flags) {
 
 u64 ExportFlags(u64 flags) {
   flags = SetFlag(flags, FLAGS_IOPL, 3);
-  flags = SetFlag(flags, FLAGS_F1, true);
+  flags = SetFlag(flags, FLAGS_F1, false);
+  flags |= 2;  // reserved bit 1 always reads as one
   flags = SetFlag(flags, FLAGS_F0, false);
   flags = flags & ~((u64)1 << FLAGS_PF);
   flags |= GetLazyParityBool(flags) << FLAGS_PF;

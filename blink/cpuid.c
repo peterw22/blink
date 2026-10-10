@@ -146,8 +146,8 @@ void OpCpuid(P) {
       dx |= 1 << 24;   // fxsave
       dx |= 1 << 25;   // sse
       dx |= 1 << 26;   // sse2
-      cx |= 0 << 19;   // sse4.1
-      cx |= 0 << 20;   // sse4.2
+      cx |= 1 << 19;   // sse4.1
+      cx |= 1 << 20;   // sse4.2
 #ifndef DISABLE_X87
       dx |= 1 << 0;  // fpu
 #endif
@@ -177,6 +177,7 @@ void OpCpuid(P) {
     case 0x80000001:
       jit = !IsJitDisabled(&m->system->jit);
       cx |= 1 << 0;     // lahf
+      cx |= 1 << 5;     // lzcnt (abm)
       cx |= jit << 31;  // jit
       dx |= 1 << 0;     // fpu
       dx |= 1 << 8;     // cmpxchg8b

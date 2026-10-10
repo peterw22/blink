@@ -15,7 +15,9 @@
 #define kJitAlign        16
 #define kJitJumpTries    16
 #define kJitBlockSize    262144
-#define kJitMemorySize   32505856
+#ifndef kJitMemorySize
+#define kJitMemorySize   268435456  // 256 MiB; was 31 MiB, too small for big JS runtimes
+#endif
 #define kJitRetireQueue  (int)(kJitMemorySize / kJitBlockSize * .10)
 #define kJitSlabInts     (65536 / sizeof(struct JitInts))
 #define kJitInitialHooks 16384
@@ -189,6 +191,7 @@ struct JitBlock {
   long lastaction;
   bool wasretired;
   bool isprotected;
+  bool isleased;  // a thread is generating code in this block right now
   unsigned pagegen;
   struct Dll elem;
   struct Dll aged;

@@ -233,7 +233,7 @@ void SignalActor(struct Machine *m) {
 
 bool DeliverSignalRecursively(struct Machine *m, int sig) {
   bool issigsuspend;
-  sigset_t unblock, oldmask;
+  sigset_t hostmask, oldmask;
   SYS_LOGF("recursing %s", DescribeSignal(sig));
   if (m->sigdepth >= kMaxSigDepth) {
     LOGF("exceeded max signal depth");
@@ -246,16 +246,24 @@ bool DeliverSignalRecursively(struct Machine *m, int sig) {
   ++m->sigdepth;
   if ((issigsuspend = m->issigsuspend)) {
     m->issigsuspend = false;
-    unassert(!sigemptyset(&unblock));
-    unassert(!pthread_sigmask(SIG_BLOCK, &unblock, &oldmask));
   }
+  // we're usually called from inside a system call wrapper that has
+  // blocked every host signal. the guest handler must run with host
+  // signals unblocked (as guest code normally does) otherwise blocking
+  // calls it makes, e.g. sigsuspend() waiting for a thread resume
+  // signal, can never be woken up. only job control signals mirror the
+  // guest mask on the host; see SysSigprocmask()
+  XlatLinuxToSigset(&hostmask, m->sigmask & ((u64)1 << (SIGTSTP_LINUX - 1) |
+                                             (u64)1 << (SIGTTIN_LINUX - 1) |
+                                             (u64)1 << (SIGTTOU_LINUX - 1)));
+  unassert(!pthread_sigmask(SIG_SETMASK, &hostmask, &oldmask));
   m->restored = false;
   m->insyscall = false;
   SignalActor(m);
   m->insyscall = true;
   m->restored = false;
+  unassert(!pthread_sigmask(SIG_SETMASK, &oldmask, 0));
   if (issigsuspend) {
-    unassert(!pthread_sigmask(SIG_SETMASK, &oldmask, 0));
     m->issigsuspend = true;
   }
   --m->sigdepth;
@@ -362,6 +370,12 @@ _Noreturn void SysExitGroup(struct Machine *m, int rc) {
     _Exit(rc);
   } else {
     THR_LOGF("calling exit(%d)", rc);
+    if (!m->system->trapexit) {
+      // Whole host process is going away; don't wait on (or SIGKILL)
+      // guest threads parked in blocking syscalls -- that turns every
+      // multithreaded guest's exit status into 137.
+      _Exit(rc);
+    }
     KillOtherThreads(m->system);
 #ifdef HAVE_JIT
     DisableJit(&m->system->jit);  // unmapping exec pages is slow
@@ -658,6 +672,10 @@ static int SysFutexWait(struct Machine *m,  //
                         i32 op,             //
                         u32 expect,         //
                         i64 timeout_addr) {
+  // FUTEX_WAIT takes a relative timeout. FUTEX_WAIT_BITSET takes an
+  // absolute one on CLOCK_MONOTONIC (or CLOCK_REALTIME with the flag).
+  bool absolute = (op & ~FUTEX_CLOCK_REALTIME_LINUX) == FUTEX_WAIT_BITSET_LINUX;
+  bool realtime = !!(op & FUTEX_CLOCK_REALTIME_LINUX);
   int rc;
   u8 *mem;
   struct Futex *f;
@@ -674,7 +692,19 @@ static int SysFutexWait(struct Machine *m,  //
     if (!(0 <= timeout.tv_nsec && timeout.tv_nsec < 1000000000)) {
       return einval();
     }
-    deadline = AddTime(now, timeout);
+    if (!absolute) {
+      deadline = AddTime(now, timeout);
+    } else if (realtime) {
+      deadline = timeout;  // GetTime() is CLOCK_REALTIME too
+    } else {
+      struct timespec mono;
+      unassert(!clock_gettime(CLOCK_MONOTONIC, &mono));
+      if (CompareTime(timeout, mono) <= 0) {
+        deadline = now;  // already expired
+      } else {
+        deadline = AddTime(now, SubtractTime(timeout, mono));
+      }
+    }
   } else {
     deadline = GetMaxTime();
   }
@@ -762,10 +792,14 @@ static int SysFutex(struct Machine *m,  //
       return SysFutexWake(m, uaddr, val);
     case FUTEX_WAIT_BITSET_LINUX:
     case FUTEX_WAIT_BITSET_LINUX | FUTEX_CLOCK_REALTIME_LINUX:
-      // will be supported soon
-      // avoid logging when cosmo feature checks this
-      if (!m->system->iscosmo) goto DefaultCase;
-      return einval();
+      // The bitset is ignored: every waiter at uaddr is eligible for any
+      // wake. That only causes spurious wakeups, which futex users must
+      // already tolerate (they re-check the word and wait again).
+      if (!val3) return einval();
+      return SysFutexWait(m, uaddr, op, val, timeout_addr);
+    case 10:  // FUTEX_WAKE_BITSET
+      if (!val3) return einval();
+      return SysFutexWake(m, uaddr, val);
     default:
     DefaultCase:
       LOGF("unsupported %s op %#x", "futex", op);
@@ -1085,7 +1119,26 @@ static int SysMprotect(struct Machine *m, i64 addr, u64 size, int prot) {
 }
 
 static int SysMadvise(struct Machine *m, i64 addr, u64 len, int advice) {
-  return 0;
+  int rc = 0;
+  // Every other advice is a hint we may ignore, but MADV_DONTNEED has
+  // semantics: private anonymous pages must read back as zeroes, which
+  // allocators (e.g. libpas in JavaScriptCore) rely upon.
+  if (advice != 4 /* MADV_DONTNEED */) return 0;
+  if (addr & 4095) return einval();
+  if (len > NUMERIC_MAX(size_t) - 4095) return einval();
+  len = ROUNDUP(len, 4096);
+  if (!len) return 0;
+  if (!IsValidAddrSize(addr, len)) return einval();
+  BEGIN_NO_PAGE_FAULTS;
+  LOCK(&m->system->mmap_lock);
+  if (IsFullyMapped(m->system, addr, len)) {
+    DiscardVirtual(m->system, addr, len);
+  } else {
+    rc = enomem();
+  }
+  UNLOCK(&m->system->mmap_lock);
+  END_NO_PAGE_FAULTS;
+  return rc;
 }
 
 static i64 SysBrk(struct Machine *m, i64 addr) {
@@ -2461,14 +2514,17 @@ static i64 SysPwrite(struct Machine *m, i32 fildes, i64 addr, u64 size,
   return rc;
 }
 
+// on x86-64 the kernel takes (fd, iov, iovcnt, pos_l, pos_h, flags) and
+// ignores pos_h; the flags are the sixth argument, not the fifth
 static i64 SysPreadv2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
-                      i64 offset, i32 flags) {
+                      i64 offset, i64 pos_h, i32 flags) {
   i64 rc;
   int oflags;
   struct Fd *fd;
   struct Iovs iv;
   ssize_t (*readv_impl)(int, const struct iovec *, int);
-  if (flags) {
+  // RWF_HIPRI and RWF_NOWAIT are only performance hints for us
+  if (flags & ~(0x01 | 0x08)) {
     LOGF("%s flags not supported yet: %#" PRIx32, "preadv2", flags);
     return einval();
   }
@@ -2510,13 +2566,14 @@ static i64 SysPreadv2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
 }
 
 static i64 SysPwritev2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
-                       i64 offset, i32 flags) {
+                       i64 offset, i64 pos_h, i32 flags) {
   i64 rc;
   int oflags;
   struct Fd *fd;
   struct Iovs iv;
   ssize_t (*writev_impl)(int, const struct iovec *, int);
-  if (flags) {
+  // RWF_HIPRI and RWF_NOWAIT are only performance hints for us
+  if (flags & ~(0x01 | 0x08)) {
     LOGF("%s flags not supported yet: %#" PRIx32, "pwritev2", flags);
     return einval();
   }
@@ -2559,23 +2616,23 @@ static i64 SysPwritev2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
 }
 
 static i64 SysReadv(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen) {
-  return SysPreadv2(m, fildes, iovaddr, iovlen, -1, 0);
+  return SysPreadv2(m, fildes, iovaddr, iovlen, -1, 0, 0);
 }
 
 static i64 SysWritev(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen) {
-  return SysPwritev2(m, fildes, iovaddr, iovlen, -1, 0);
+  return SysPwritev2(m, fildes, iovaddr, iovlen, -1, 0, 0);
 }
 
 static i64 SysPreadv(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
                      i64 offset) {
   if (offset < 0) return einval();
-  return SysPreadv2(m, fildes, iovaddr, iovlen, offset, 0);
+  return SysPreadv2(m, fildes, iovaddr, iovlen, offset, 0, 0);
 }
 
 static i64 SysPwritev(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
                       i64 offset) {
   if (offset < 0) return einval();
-  return SysPwritev2(m, fildes, iovaddr, iovlen, offset, 0);
+  return SysPwritev2(m, fildes, iovaddr, iovlen, offset, 0, 0);
 }
 
 static i64 SysSendfile(struct Machine *m, i32 out_fd, i32 in_fd, i64 offsetaddr,
@@ -4007,14 +4064,17 @@ TryAgain:
 static int SigsuspendActual(struct Machine *m, u64 mask) {
   int rc;
   u64 oldmask;
-  sigset_t block_host, oldmask_host;
+  sigset_t block_host, oldmask_host, waitmask_host;
   oldmask = m->sigmask;
   unassert(!sigfillset(&block_host));
   unassert(!pthread_sigmask(SIG_BLOCK, &block_host, &oldmask_host));
   m->sigmask = mask;
   SIG_LOGF("sigmask push %" PRIx64, m->sigmask);
   m->issigsuspend = true;
-  NORESTART(rc, sigsuspend(&oldmask_host));
+  // blink wakes threads with SIGSYS, so it must never be blocked here
+  waitmask_host = oldmask_host;
+  unassert(!sigdelset(&waitmask_host, SIGSYS));
+  NORESTART(rc, sigsuspend(&waitmask_host));
   m->issigsuspend = false;
   unassert(!pthread_sigmask(SIG_SETMASK, &oldmask_host, 0));
   m->sigmask = oldmask;
@@ -5304,6 +5364,32 @@ static i32 SysEpollCreate1(struct Machine *m, i32 flags) {
   return fildes;
 }
 
+#ifdef __linux
+#include <sys/eventfd.h>
+static i32 SysEventfd2(struct Machine *m, u32 initval, i32 flags) {
+  int lim, fildes, oflags = O_RDWR, sysflags = 0;
+  if (flags & 0x080000) { oflags |= O_CLOEXEC; sysflags |= EFD_CLOEXEC; flags &= ~0x080000; }
+  if (flags & 0x800) { oflags |= O_NONBLOCK; sysflags |= EFD_NONBLOCK; flags &= ~0x800; }
+  if (flags & 1) { sysflags |= EFD_SEMAPHORE; flags &= ~1; }
+  if (flags) return einval();
+  if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
+  if ((fildes = eventfd(initval, sysflags)) != -1) {
+    if (fildes >= lim) {
+      close(fildes);
+      fildes = emfile();
+    } else {
+      LOCK(&m->system->fds.lock);
+      unassert(AddFd(&m->system->fds, fildes, oflags));
+      UNLOCK(&m->system->fds.lock);
+    }
+  }
+  return fildes;
+}
+static i32 SysEventfd(struct Machine *m, u32 initval) {
+  return SysEventfd2(m, initval, 0);
+}
+#endif
+
 static i32 SysEpollCreate(struct Machine *m, i32 size) {
   if (size <= 0) return einval();
   return SysEpollCreate1(m, 0);
@@ -5682,11 +5768,15 @@ void OpSyscall(P) {
     SYSCALL(5, 0x10F, "ppoll", SysPpoll, STRACE_5);
     SYSCALL(5, 0x13C, "renameat2", SysRenameat2, STRACE_RENAMEAT2);
     SYSCALL(3, 0x13E, "getrandom", SysGetrandom, STRACE_GETRANDOM);
-    SYSCALL(5, 0x147, "preadv2", SysPreadv2, STRACE_PREADV2);
-    SYSCALL(5, 0x148, "pwritev2", SysPwritev2, STRACE_PWRITEV2);
+    SYSCALL(6, 0x147, "preadv2", SysPreadv2, STRACE_PREADV2);
+    SYSCALL(6, 0x148, "pwritev2", SysPwritev2, STRACE_PWRITEV2);
     SYSCALL(3, 0x1B4, "close_range", SysCloseRange, STRACE_3);
 #ifdef HAVE_EPOLL_PWAIT1
     SYSCALL(1, 0x0D5, "epoll_create", SysEpollCreate, STRACE_1);
+#ifdef __linux
+    SYSCALL(1, 0x11C, "eventfd", SysEventfd, STRACE_1);
+    SYSCALL(2, 0x122, "eventfd2", SysEventfd2, STRACE_2);
+#endif
     SYSCALL(1, 0x123, "epoll_create1", SysEpollCreate1, STRACE_1);
     SYSCALL(4, 0x0E9, "epoll_ctl", SysEpollCtl, STRACE_4);
     SYSCALL(4, 0x0E8, "epoll_wait", SysEpollWait, STRACE_4);

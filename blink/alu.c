@@ -250,7 +250,8 @@ i64 Neg8(struct Machine *m, u64 x64, u64 y) {
   u8 x;
   bool cf, of, af;
   x = x64;
-  af = cf = !!x;
+  cf = !!x;
+  af = !!(x & 15);
   of = x == 0x80;
   x = ~x + 1;
   return AluFlags8(m, x, af, of, cf);
@@ -260,7 +261,8 @@ i64 Neg32(struct Machine *m, u64 x64, u64 y) {
   u32 x;
   bool cf, of, af;
   x = x64;
-  af = cf = !!x;
+  cf = !!x;
+  af = !!(x & 15);
   of = x == 0x80000000;
   x = ~x + 1;
   return AluFlags32(m, x, af, of, cf);
@@ -270,7 +272,8 @@ i64 Neg64(struct Machine *m, u64 x64, u64 y) {
   u64 x;
   bool cf, of, af;
   x = x64;
-  af = cf = !!x;
+  cf = !!x;
+  af = !!(x & 15);
   of = x == 0x8000000000000000;
   x = ~x + 1;
   return AluFlags64(m, x, af, of, cf);
@@ -674,7 +677,8 @@ i64 Neg16(struct Machine *m, u64 x64, u64 y) {
   u16 x;
   bool cf, of, af;
   x = x64;
-  af = cf = !!x;
+  cf = !!x;
+  af = !!(x & 15);
   of = x == 0x8000;
   x = ~x + 1;
   return AluFlags16(m, x, af, of, cf);

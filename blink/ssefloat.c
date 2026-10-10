@@ -107,7 +107,7 @@ void OpUnpckhpsd(P) {
   b = GetModrmRegisterXmmPointerRead16(A);
   IGNORE_RACES_START();
   if (Osz(rde)) {
-    memcpy(a + 0, b + 8, 8);
+    memcpy(a + 0, a + 8, 8);
     memcpy(a + 8, b + 8, 8);
   } else {
     memcpy(a + 4 * 0, a + 4 * 2, 4);
@@ -122,7 +122,7 @@ void OpPextrwGdqpUdqIb(P) {
   u8 i;
   i = uimm0;
   i &= Osz(rde) ? 7 : 3;
-  Put16(RegRexrReg(m, rde), Get16(XmmRexbRm(m, rde) + i * 2));
+  Put64(RegRexrReg(m, rde), Get16(XmmRexbRm(m, rde) + i * 2));
 }
 
 void OpPinsrwVdqEwIb(P) {
@@ -370,12 +370,14 @@ static void ComissKernel(const u8 rxr[8], const u8 reg[8], struct Machine *m) {
     m->flags = SetFlag(m->flags, FLAGS_PF, false);
     m->flags = SetFlag(m->flags, FLAGS_SF, false);
     m->flags = SetFlag(m->flags, FLAGS_OF, false);
+    m->flags = SetFlag(m->flags, FLAGS_AF, false);
   } else {
     m->flags = SetFlag(m->flags, FLAGS_ZF, true);
     m->flags = SetFlag(m->flags, FLAGS_CF, true);
     m->flags = SetFlag(m->flags, FLAGS_PF, true);
     m->flags = SetFlag(m->flags, FLAGS_SF, false);
     m->flags = SetFlag(m->flags, FLAGS_OF, false);
+    m->flags = SetFlag(m->flags, FLAGS_AF, false);
     m->mxcsr |= kMxcsrIe;
     if (!(m->mxcsr & kMxcsrIm)) {
       HaltMachine(m, kMachineSimdException);
@@ -429,6 +431,7 @@ void OpComissVsWs(P) {
   m->flags = SetFlag(m->flags, FLAGS_CF, cf);
   m->flags = SetFlag(m->flags, FLAGS_SF, false);
   m->flags = SetFlag(m->flags, FLAGS_OF, false);
+  m->flags = SetFlag(m->flags, FLAGS_AF, false);
   if (!isucomiss) {
     m->mxcsr &= ~kMxcsrIe;
     if (ie) {
@@ -593,10 +596,10 @@ static int Cmps(int imm, float x, float y) {
       return isnan(x) || isnan(y) ? -1 : 0;
     case 4:
       return x != y ? -1 : 0;
-    case 5:
-      return x >= y ? -1 : 0;
-    case 6:
-      return x > y ? -1 : 0;
+    case 5:  // nlt (true when unordered)
+      return !(x < y) ? -1 : 0;
+    case 6:  // nle (true when unordered)
+      return !(x <= y) ? -1 : 0;
     case 7:
       return !(isnan(x) || isnan(y)) ? -1 : 0;
     default:
@@ -616,10 +619,10 @@ static i32 Cmpd(int imm, double x, double y) {
       return isnan(x) || isnan(y) ? -1 : 0;
     case 4:
       return x != y ? -1 : 0;
-    case 5:
-      return x >= y ? -1 : 0;
-    case 6:
-      return x > y ? -1 : 0;
+    case 5:  // nlt (true when unordered)
+      return !(x < y) ? -1 : 0;
+    case 6:  // nle (true when unordered)
+      return !(x <= y) ? -1 : 0;
     case 7:
       return !(isnan(x) || isnan(y)) ? -1 : 0;
     default:
@@ -634,13 +637,13 @@ void OpCmppsd(P) {
     union DoublePun x, y;
     y.i = Read64(GetModrmRegisterXmmPointerRead8(A));
     x.i = Read64(XmmRexrReg(m, rde));
-    x.f = Cmpd(imm, x.f, y.f);
+    x.i = Cmpd(imm, x.f, y.f);
     Write64(XmmRexrReg(m, rde), x.i);
   } else if (Rep(rde) == 3) {
     union FloatPun x, y;
     y.i = Read32(GetModrmRegisterXmmPointerRead4(A));
     x.i = Read32(XmmRexrReg(m, rde));
-    x.f = Cmps(imm, x.f, y.f);
+    x.i = Cmps(imm, x.f, y.f);
     Write32(XmmRexrReg(m, rde), x.i);
   } else if (Osz(rde)) {
     u8 *p;
@@ -651,8 +654,8 @@ void OpCmppsd(P) {
     p = XmmRexrReg(m, rde);
     x[0].i = Read64(p + 0 * 8);
     x[1].i = Read64(p + 1 * 8);
-    x[0].f = Cmpd(imm, x[0].f, y[0].f);
-    x[1].f = Cmpd(imm, x[1].f, y[1].f);
+    x[0].i = Cmpd(imm, x[0].f, y[0].f);
+    x[1].i = Cmpd(imm, x[1].f, y[1].f);
     Write64(p + 0 * 8, x[0].i);
     Write64(p + 1 * 8, x[1].i);
   } else {
@@ -668,10 +671,10 @@ void OpCmppsd(P) {
     x[1].i = Read32(p + 1 * 4);
     x[2].i = Read32(p + 2 * 4);
     x[3].i = Read32(p + 3 * 4);
-    x[0].f = Cmps(imm, x[0].f, y[0].f);
-    x[1].f = Cmps(imm, x[1].f, y[1].f);
-    x[2].f = Cmps(imm, x[2].f, y[2].f);
-    x[3].f = Cmps(imm, x[3].f, y[3].f);
+    x[0].i = Cmps(imm, x[0].f, y[0].f);
+    x[1].i = Cmps(imm, x[1].f, y[1].f);
+    x[2].i = Cmps(imm, x[2].f, y[2].f);
+    x[3].i = Cmps(imm, x[3].f, y[3].f);
     Write32(p + 0 * 4, x[0].i);
     Write32(p + 1 * 4, x[1].i);
     Write32(p + 2 * 4, x[2].i);
