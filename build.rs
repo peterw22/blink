@@ -26,10 +26,12 @@ fn main() {
     println!("cargo:rerun-if-changed={}", blink.join("blink").display());
     println!("cargo:rerun-if-changed={}", blink.join("config.h").display());
 
-    if !target.contains("linux") {
-        // The Windows (UWP) host layer doesn't exist yet: blink's C code still
-        // needs POSIX. Build the Rust side only so `cargo check` keeps working.
-        println!("cargo:warning=blink C sources are only linked for Linux targets so far");
+    let windows = target.contains("windows");
+    let win = manifest.join("win");
+    if windows {
+        println!("cargo:rerun-if-changed={}", win.display());
+    } else if !target.contains("linux") {
+        println!("cargo:warning=blink is only built for Linux and Windows targets");
         return;
     }
 
@@ -45,10 +47,30 @@ fn main() {
 
     // Flags from blink's config.mk; GCC rather than the user's `cc` (zig) shim,
     // whose bundled glibc 2.33 headers mishandle termios speeds.
+    let xwin = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".local/share/xwin");
     let base = || {
         let mut b = cc::Build::new();
-        if std::env::var_os("CC").is_none() {
-            b.compiler("gcc");
+        if windows {
+            // clang (GNU driver) for the MSVC target: blink is GNU C. The POSIX
+            // headers in win/include come first; win/config.h replaces blink's.
+            b.compiler("clang")
+                .archiver("llvm-lib")
+                .flag("-fms-compatibility-version=19.44")
+                .flag("-fgnuc-version=4.2.1")
+                .flag("-std=gnu11")
+                .flag("-include")
+                .flag(win.join("include/blinkwin.h").to_str().unwrap())
+                .include(&win)
+                .include(win.join("include"));
+            for dir in ["crt/include", "sdk/include/ucrt", "sdk/include/um", "sdk/include/shared"] {
+                b.flag("-isystem").flag(xwin.join(dir).to_str().unwrap());
+            }
+            b.static_crt(true);
+        } else {
+            if std::env::var_os("CC").is_none() {
+                b.compiler("gcc");
+            }
+            b.flag("-pthread").flag("-fcf-protection=none");
         }
         b.include(&blink)
             .include(blink.join("third_party/libz"))
@@ -56,10 +78,8 @@ fn main() {
             .debug(true)
             .warnings(false)
             .flag("-fno-common")
-            .flag("-pthread")
             .flag("-fno-omit-frame-pointer")
             .flag("-fno-optimize-sibling-calls")
-            .flag("-fcf-protection=none")
             .flag("-U_FORTIFY_SOURCE")
             .define("_FILE_OFFSET_BITS", "64")
             .define("_DEFAULT_SOURCE", None)
@@ -95,7 +115,7 @@ fn main() {
     // build info, plus renaming blink's C main() so Rust can call it
     info.define("main", "blink_c_main")
         .define("BUILD_MODE", quoted("blink-xbox").as_str())
-        .define("BUILD_TOOLCHAIN", quoted("gcc via cc-rs").as_str())
+        .define("BUILD_TOOLCHAIN", quoted(if windows { "clang (msvc target) via cc-rs" } else { "gcc via cc-rs" }).as_str())
         .define("BLINK_VERSION", quoted("1.1.0").as_str())
         .define("BLINK_COMMITS", quoted(&commits).as_str())
         .define("BLINK_GITSHA", quoted(&sha).as_str())
@@ -108,7 +128,8 @@ fn main() {
     let mut z = base();
     for entry in std::fs::read_dir(blink.join("third_party/libz")).unwrap() {
         let path = entry.unwrap().path();
-        if path.extension().is_some_and(|e| e == "c") {
+        let gz = path.file_name().unwrap().to_str().unwrap().starts_with("gz");
+        if path.extension().is_some_and(|e| e == "c") && !gz {
             z.file(path);
         }
     }
@@ -119,7 +140,22 @@ fn main() {
     println!("cargo:rustc-link-lib=static=blink");
     println!("cargo:rustc-link-lib=static=blinkuop");
     println!("cargo:rustc-link-lib=static=blinkz");
-    for lib in ["pthread", "m", "rt"] {
-        println!("cargo:rustc-link-lib={lib}");
+    if windows {
+        // setjmp/longjmp that don't unwind, and stand-ins for code left out
+        let mut extra = base();
+        extra.file(win.join("stubs.c"));
+        extra.compile("blinkwin");
+        // assembly: none of the C flags (the forced include is C)
+        cc::Build::new()
+            .compiler("clang")
+            .archiver("llvm-lib")
+            .file(win.join("setjmp.S"))
+            .compile("blinkwinasm");
+        println!("cargo:rustc-link-lib=static=blinkwin");
+        println!("cargo:rustc-link-lib=static=blinkwinasm");
+    } else {
+        for lib in ["pthread", "m", "rt"] {
+            println!("cargo:rustc-link-lib={lib}");
+        }
     }
 }

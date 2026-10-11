@@ -2,3 +2,17 @@
 # targeting glibc 2.33, which lacks symbols the GCC-compiled C uses.
 [target.x86_64-unknown-linux-gnu]
 linker = "gcc"
+
+# Windows test builds (run under Wine in the VM): rust-lld with the CRT and
+# SDK import libraries from `xwin splat` (as claude-fm-xbox does), static
+# CRT. Not /APPCONTAINER: that's for the UWP app, which links the library.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
+rustflags = [
+    "-C", "linker-flavor=lld-link",
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/ignore:4099",
+    "-L", "native=/home/tingouw/.local/share/xwin/crt/lib/x86_64",
+    "-L", "native=/home/tingouw/.local/share/xwin/sdk/lib/um/x86_64",
+    "-L", "native=/home/tingouw/.local/share/xwin/sdk/lib/ucrt/x86_64",
+]

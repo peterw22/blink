@@ -1,48 +1,75 @@
 //! Rust front end for the C blink x86-64 Linux emulator.
 //!
 //! The emulator itself (decoder, interpreter, JIT, MMU, Linux syscall
-//! emulation) stays in C. Rust drives it and, for the Xbox, will replace the
-//! pieces that can't work inside a UWP app: host `fork`/`exec` (guest
-//! processes become in-process structs on threads) and the POSIX host layer.
+//! emulation) stays in C. Rust drives it and replaces the pieces that can't
+//! work inside a UWP app on the Xbox: host `fork`/`exec` (guest processes run
+//! as threads, see `procs`) and the POSIX host layer (`win`).
 
 use std::ffi::{c_char, c_int, CString};
 
-#[cfg(target_os = "linux")]
 mod procs;
+#[cfg(windows)]
+pub mod win;
 
-#[cfg(target_os = "linux")]
 extern "C" {
     /// blink's `main()` from blink/blink.c, renamed by build.rs.
     fn blink_c_main(argc: c_int, argv: *mut *mut c_char, envp: *mut *mut c_char) -> c_int;
 }
 
+fn c_strings<I, S>(items: I) -> Vec<CString>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<Vec<u8>>,
+{
+    items.into_iter().map(|a| CString::new(a).expect("argument contains a NUL byte")).collect()
+}
+
+fn c_vector(strings: &[CString]) -> Vec<*mut c_char> {
+    let mut v: Vec<*mut c_char> = strings.iter().map(|s| s.as_ptr() as *mut c_char).collect();
+    v.push(std::ptr::null_mut());
+    v
+}
+
 /// Runs blink with C-style arguments (`args[0]` is the emulator's own name,
-/// then blink flags, then the guest program and its arguments). Returns the
-/// guest's exit status. blink may also exit the process directly.
-#[cfg(target_os = "linux")]
+/// then blink flags, then the guest program and its arguments) and the given
+/// guest environment. Returns the guest's exit status; blink may also exit
+/// the process directly.
+pub fn run_with_env<A, S, E, T>(args: A, env: E) -> i32
+where
+    A: IntoIterator<Item = S>,
+    S: Into<Vec<u8>>,
+    E: IntoIterator<Item = T>,
+    T: Into<Vec<u8>>,
+{
+    let args = c_strings(args);
+    let env = c_strings(env);
+    let mut argv = c_vector(&args);
+    let mut envp = c_vector(&env);
+    // SAFETY: argv and envp are NUL-terminated and their strings outlive the
+    // call; blink only reads them (it copies them onto the guest stack).
+    unsafe { blink_c_main((argv.len() - 1) as c_int, argv.as_mut_ptr(), envp.as_mut_ptr()) }
+}
+
+/// Runs blink with this process's environment (see `run_with_env`).
+#[cfg(unix)]
 pub fn run<I, S>(args: I) -> i32
 where
     I: IntoIterator<Item = S>,
     S: Into<Vec<u8>>,
 {
-    let owned: Vec<CString> = args
-        .into_iter()
-        .map(|a| CString::new(a).expect("argument contains a NUL byte"))
-        .collect();
-    let mut argv: Vec<*mut c_char> = owned.iter().map(|a| a.as_ptr() as *mut c_char).collect();
-    argv.push(std::ptr::null_mut());
-    extern "C" {
-        static mut environ: *mut *mut c_char;
-    }
-    // SAFETY: argv is NUL-terminated and its strings outlive the call; blink
-    // only reads argv/envp (it copies them onto the guest stack).
-    unsafe { blink_c_main((argv.len() - 1) as c_int, argv.as_mut_ptr(), environ) }
+    use std::os::unix::ffi::OsStringExt;
+    run_with_env(args, std::env::vars_os().map(|(k, v)| {
+        let mut kv = k.into_vec();
+        kv.push(b'=');
+        kv.extend(v.into_vec());
+        kv
+    }))
 }
 
 /// Like `run()`, but guest processes created by fork()/vfork() run as
 /// threads of this host process instead of host processes, the way they
 /// must on the Xbox. Forces blink's non-linear memory mode (`-m`).
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub fn run_in_process<I, S>(args: I) -> i32
 where
     I: IntoIterator<Item = S>,
@@ -54,11 +81,20 @@ where
     run(args)
 }
 
-#[cfg(not(target_os = "linux"))]
-pub fn run<I, S>(_args: I) -> i32
+/// Runs blink on Windows, where guest processes can only run in-process
+/// (blink's non-linear memory, `-m`, is forced). The guest gets `env` as its
+/// environment; the host's Windows environment means nothing to it.
+#[cfg(windows)]
+pub fn run<A, S, E, T>(args: A, env: E) -> i32
 where
-    I: IntoIterator<Item = S>,
+    A: IntoIterator<Item = S>,
     S: Into<Vec<u8>>,
+    E: IntoIterator<Item = T>,
+    T: Into<Vec<u8>>,
 {
-    unimplemented!("the Windows host layer for blink is not written yet")
+    win::init();
+    let mut args: Vec<Vec<u8>> = args.into_iter().map(Into::into).collect();
+    args.insert(1.min(args.len()), b"-m".to_vec());
+    procs::install();
+    run_with_env(args, env)
 }
