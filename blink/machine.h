@@ -201,6 +201,7 @@ struct FileMap {
   char *path;       // duplicated (owned) pointer to filename
   u64 *present;     // bitset of present pages in [virt,virt+size)
   struct Dll elem;  // see System::filemaps
+  void *src;        // VfsInfo for reading in lazily loaded pages, or null
 };
 
 struct MachineFpu {
@@ -301,6 +302,10 @@ struct System {
   _Atomic(long) vss;
   struct Dis *dis;
   struct Dll *filemaps;
+  void *vfsproc;  // struct VfsProc: per-process fds and cwd (VFS only)
+  bool borrowedmm;  // vfork() child running on its parent's page tables
+  struct System *mmowner;  // the parent, if borrowedmm
+  pthread_mutex_t_ filemaps_lock;  // guards filemaps and file page reads
   struct MachineMemstat memstat;
   struct Dll *machines;
   uintptr_t ender;
@@ -475,6 +480,7 @@ bool IsOrphan(struct Machine *) nosideeffect;
 _Noreturn void Blink(struct Machine *);
 _Noreturn void Actor(struct Machine *);
 void Jitter(P, const char *, ...);
+void ResetJitter(void);
 void FreeMachine(struct Machine *);
 void InvalidateSystem(struct System *, bool, bool);
 void RemoveOtherThreads(struct System *);
@@ -491,8 +497,10 @@ u64 AllocatePageTable(struct System *);
 u64 AllocateAnonymousPage(struct System *);
 void FreeAnonymousPage(struct System *, u8 *);
 u64 FindPageTableEntry(struct Machine *, u64);
+bool FillFilePage(struct System *, i64, u8 *);
 bool CheckMemoryInvariants(struct System *) nosideeffect dontdiscard;
 i64 ReserveVirtual(struct System *, i64, i64, u64, int, i64, bool, bool);
+int ForkVirtual(struct System *, struct System *);
 char *FormatPml4t(struct Machine *);
 i64 FindVirtual(struct System *, i64, i64);
 int FreeVirtual(struct System *, i64, i64);

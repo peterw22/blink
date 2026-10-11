@@ -482,7 +482,8 @@ int HostfsTraverse(struct VfsInfo **dir, const char **path,
     *dir = next;
     currentpath = nextpath;
     VFS_LOGF("HostfsTraverse: Changed current path to \"%s\"", currentpath);
-    if (!S_ISDIR(st.st_mode)) {
+    if (!S_ISDIR(st.st_mode) || VfsIsMountPoint(next)) {
+      // let the caller cross into the mounted filesystem (e.g. /proc)
       break;
     }
   }

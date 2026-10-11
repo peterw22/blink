@@ -1091,11 +1091,10 @@ static int ProcfsFutime(struct VfsInfo *info, const struct timespec times[2]) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-struct VfsInfo *g_selfexeinfo = NULL;
+#define g_selfexeinfo (VfsCurrentProc()->exe)
 
 int ProcfsRegisterExe(i32 pid, const char *path) {
   struct VfsInfo *newinfo, *tmp;
-  unassert(pid == ProcfsPid());
   unassert(!VfsTraverse(path, &newinfo, true));
   tmp = g_selfexeinfo;
   g_selfexeinfo = newinfo;

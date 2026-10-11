@@ -1631,6 +1631,13 @@ static long GetMicroOpLength(void *uop) {
 _Thread_local static long i;
 _Thread_local static u8 stack[8];
 
+// Forgets operands left on the stack when generating code for an
+// instruction was cut short (e.g. its memory access faulted and longjmp'd
+// out); otherwise they'd corrupt the code generated for later ones.
+void ResetJitter(void) {
+  i = 0;
+}
+
 static inline unsigned CheckBelow(unsigned x, unsigned n) {
   unassert(x < n);
   return x;
@@ -1854,6 +1861,7 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
                  "t"         // arg0 = pointer
                  LOADSTORE,  // call micro-op (read vector shared memory)
                  (u64)0, (u64)(1 << log2sz), ReserveAddress, kLoad[log2sz]);
+          m->reserving = true;  // see AddPath_EndOp()
         }
         break;
 
@@ -1895,6 +1903,7 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
                    "t"         // arg0 = res0
                    LOADSTORE,  // call function (write word to shared memory)
                    (u64)1, (u64)(1 << log2sz), ReserveAddress, kStore[log2sz]);
+            m->reserving = true;  // see AddPath_EndOp()
           }
         } else {
           if (IsModrmRegister(rde)) {
@@ -1950,6 +1959,7 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
                    "t"         // arg0 = res0
                    LOADSTORE,  // call micro-op (store vector to shared memory)
                    (u64)1, (u64)(1 << log2sz), ReserveAddress, kStore[log2sz]);
+            m->reserving = true;  // see AddPath_EndOp()
           }
         }
         break;
@@ -2059,6 +2069,7 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
                  "q"      // arg0 = machine
                  "c",     // res0 = call function (turn virtual into pointer)
                  (u64)0, (u64)(1 << log2sz), ReserveAddress);
+          m->reserving = true;  // see AddPath_EndOp()
         }
         break;
 

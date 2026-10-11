@@ -259,11 +259,27 @@ static void MovsdVpsWps(P) {
   }
 }
 
+// movsd to memory without a linear mapping: the generic "z4P" pointer
+// is reserved read-only and 16 bytes wide, so a store near the end of a
+// page would land in a stash that never gets written back.
+static void MovsdWpsVpsNonlinear(struct Machine *m, i64 v, long reg) {
+  Write64(ReserveAddress(m, v, 8, true), Read64(m->xmm[reg]));
+  if (m->stashaddr) CommitStash(m);
+}
+
 static void MovsdWpsVps(P) {
   IGNORE_RACES_START();
   memcpy(GetModrmRegisterXmmPointerWrite8(A), XmmRexrReg(m, rde), 8);
   IGNORE_RACES_END();
-  if (IsMakingPath(m)) {
+  if (IsMakingPath(m) && !IsModrmRegister(rde) && !HasLinearMapping()) {
+    Jitter(A,
+           "L"      // res0 = load effective address
+           "a2i"    // arg2 = RexrReg(rde)
+           "r0a1="  // arg1 = res0
+           "q"      // arg0 = machine
+           "c",     // call function
+           RexrReg(rde), MovsdWpsVpsNonlinear);
+  } else if (IsMakingPath(m)) {
     Jitter(A,
            "z4P"    // res0 = GetXmmOrMemPointer(RexbRm)
            "a2i"    // arg2 = RexrReg(rde)

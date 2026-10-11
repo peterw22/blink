@@ -39,6 +39,7 @@
 #include "blink/macros.h"
 #include "blink/map.h"
 #include "blink/overlays.h"
+#include "blink/procs.h"
 #include "blink/pml4t.h"
 #include "blink/signal.h"
 #include "blink/sigwinch.h"
@@ -150,6 +151,17 @@ void TerminateSignal(struct Machine *m, int sig, int code) {
   int syssig;
   struct sigaction sa;
   unassert(!IsSignalIgnoredByDefault(sig));
+  if (g_prochost) {
+    if (IsSignalSerious(sig)) {
+      ERRF("pid %d terminating due to %s ("
+           "rip=%#" PRIx64 " "
+           "code=%d "
+           "faultaddr=%#" PRIx64 ")",
+           m->system->pid, DescribeSignal(sig), m->ip, code, m->faultaddr);
+      PrintDiagnostics(m);
+    }
+    ExitProcess(m, sig & 127);
+  }
   KillOtherThreads(m->system);
 #ifdef HAVE_JIT
   DisableJit(&m->system->jit);  // unmapping exec pages is slow
@@ -212,6 +224,17 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
   if (FLAG_nojit) DisableJit(&m->system->jit);
 #endif
   m->system->exec = Exec;
+  if (g_prochost) {
+    if (old) {
+      // execve() keeps the pid, and the process host learns where to
+      // route signals now (which also releases a vfork() parent)
+      m->system->pid = m->tid = old->system->pid;
+      g_prochost->Exec(m->system->pid, m->system);
+    } else {
+      m->system->pid = m->tid = g_rootpid =
+          g_prochost->Register(0, m->system, false);
+    }
+  }
   if (!old) {
     // this is the first time a program is being loaded
     LoadProgram(m, execfn, prog, argv, envp, NULL);
@@ -226,7 +249,12 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
 #endif
     unassert(!m->sysdepth);
     unassert(!m->pagelocks.i);
-    unassert(!FreeVirtual(old->system, -0x800000000000, 0x1000000000000));
+    if (old->system->borrowedmm) {
+      // vfork() child; the memory belongs to the parent
+      old->system->cr3 = 0;
+    } else {
+      unassert(!FreeVirtual(old->system, -0x800000000000, 0x1000000000000));
+    }
     for (i = 1; i <= 64; ++i) {
       if (Read64(old->system->hands[i - 1].handler) == SIG_IGN_LINUX) {
         Write64(m->system->hands[i - 1].handler, SIG_IGN_LINUX);

@@ -131,6 +131,7 @@ static struct JitGlobals {
   pthread_mutex_t_ lock;
   _Atomic(long) prot;
   int freecount;
+  bool populated;  // whether g_code has been carved into freeblocks
   struct Dll *freeblocks;
 } g_jit = {
     PTHREAD_MUTEX_INITIALIZER_,
@@ -778,10 +779,17 @@ int InitJit(struct Jit *jit, uintptr_t opt_staging_function) {
   unassert(funcs = (_Atomic(int) *)Calloc(n, sizeof(*funcs)));
   atomic_store_explicit(&jit->hooks.virts, virts, memory_order_relaxed);
   atomic_store_explicit(&jit->hooks.funcs, funcs, memory_order_relaxed);
-  for (brk = 0; (jb = InitJitBlock(jit, &brk));) {
-    dll_make_last(&g_jit.freeblocks, &jb->elem);
-    ++g_jit.freecount;
+  // g_code is shared by every Jit (one per guest process), so it must
+  // only be carved into blocks once; later Jits reuse released blocks.
+  LOCK(&g_jit.lock);
+  if (!g_jit.populated) {
+    for (brk = 0; (jb = InitJitBlock(jit, &brk));) {
+      dll_make_last(&g_jit.freeblocks, &jb->elem);
+      ++g_jit.freecount;
+    }
+    g_jit.populated = true;
   }
+  UNLOCK(&g_jit.lock);
   JIT_LOGF("initialized jit %p", jit);
   return 0;
 }
@@ -835,6 +843,7 @@ int ShutdownJit(void) {
     --g_jit.freecount;
   }
   unassert(!g_jit.freecount);
+  g_jit.populated = false;
   return 0;
 }
 

@@ -72,6 +72,7 @@
 #include "blink/overlays.h"
 #include "blink/pml4t.h"
 #include "blink/preadv.h"
+#include "blink/procs.h"
 #include "blink/random.h"
 #include "blink/signal.h"
 #include "blink/stats.h"
@@ -277,6 +278,13 @@ bool CheckInterrupt(struct Machine *m, bool restartable) {
   bool res, restart;
   int sig, delivered;
   // an actual i/o call just received EINTR from the kernel
+  if (atomic_load_explicit(&m->killed, memory_order_acquire)) {
+    // another thread is ending the process; give up so we exit soon
+    Put64(m->ax, -EINTR_LINUX);
+    errno = EINTR;
+    m->interrupted = true;
+    return true;
+  }
 HandleSomeMoreInterrupts:
   // determine if there's any signals pending for our guest
   Put64(m->ax, -EINTR_LINUX);
@@ -305,8 +313,17 @@ HandleSomeMoreInterrupts:
   return res;
 }
 
+// Futexes are keyed by host address, so guest processes that share the
+// host process (and possibly guest addresses) can't wake each other.
+static i64 FutexKey(struct Machine *m, i64 addr) {
+  u8 *p;
+  if ((p = LookupAddress(m, addr))) return (i64)(intptr_t)p;
+  return addr;
+}
+
 static struct Futex *FindFutex(struct Machine *m, i64 addr) {
   struct Dll *e;
+  addr = FutexKey(m, addr);
   for (e = dll_first(g_bus->futexes.active); e;
        e = dll_next(g_bus->futexes.active, e)) {
     if (FUTEX_CONTAINER(e)->addr == addr) {
@@ -360,9 +377,21 @@ static void ClearChildTid(struct Machine *m) {
 #endif
 }
 
+// Converts a ProcessHost result (-errno on failure) to blink convention.
+static int ProcResult(int rc) {
+  if (rc < 0) {
+    errno = -rc;
+    return -1;
+  }
+  return rc;
+}
+
 _Noreturn void SysExitGroup(struct Machine *m, int rc) {
   THR_LOGF("pid=%d tid=%d SysExitGroup", m->system->pid, m->tid);
   ClearChildTid(m);
+  if (g_prochost) {
+    ExitProcess(m, (rc & 255) << 8);
+  }
   if (m->system->isfork) {
 #ifndef NDEBUG
     if (FLAG_statistics) {
@@ -493,15 +522,20 @@ static int Fork(struct Machine *m, u64 flags, u64 stack, u64 ctid) {
 }
 
 static int SysFork(struct Machine *m) {
+  if (g_prochost) return ForkProcess(m, SIGCHLD_LINUX, 0, 0);
   return Fork(m, 0, 0, 0);
 }
 
 static int SysVfork(struct Machine *m) {
+  if (g_prochost) {
+    return ForkProcess(m, CLONE_VM_LINUX | CLONE_VFORK_LINUX | SIGCHLD_LINUX,
+                       0, 0);
+  }
   // TODO: Parent should be stopped while child is running.
   return SysFork(m);
 }
 
-static void *OnSpawn(void *arg) {
+void *OnSpawn(void *arg) {
   int rc;
   struct Machine *m = (struct Machine *)arg;
   THR_LOGF("pid=%d tid=%d OnSpawn", m->system->pid, m->tid);
@@ -611,6 +645,7 @@ static bool IsForkOrVfork(u64 flags) {
 static int SysClone(struct Machine *m, u64 flags, u64 stack, u64 ptid, u64 ctid,
                     u64 tls, u64 func) {
   if (IsForkOrVfork(flags)) {
+    if (g_prochost) return ForkProcess(m, flags, stack, ctid);
 #ifdef HAVE_FORK
     return Fork(m, flags, stack, ctid);
 #else
@@ -723,7 +758,7 @@ static int SysFutexWait(struct Machine *m,  //
     UNLOCK(&f->lock);
   }
   if (!f) {
-    if ((f = NewFutex(uaddr))) {
+    if ((f = NewFutex(FutexKey(m, uaddr)))) {
       dll_make_first(&g_bus->futexes.active, &f->elem);
     } else {
       UNLOCK(&g_bus->futexes.lock);
@@ -3566,6 +3601,7 @@ static bool IsBlinkSig(struct System *s, int sig) {
 
 static void ResetTimerDispositions(struct System *s) {
   struct itimerval it;
+  if (g_prochost) return;  // host timers are shared by all processes
   memset(&it, 0, sizeof(it));
   setitimer(ITIMER_REAL, &it, 0);
 }
@@ -3580,7 +3616,7 @@ static void ResetSignalDispositions(struct System *s) {
         Read64(s->hands[sig - 1].handler) != SIG_DFL_LINUX &&
         (syssig = XlatSignal(sig)) != -1) {
       Write64(s->hands[sig - 1].handler, SIG_DFL_LINUX);
-      signal(syssig, SIG_DFL);
+      if (!g_prochost) signal(syssig, SIG_DFL);
     }
   }
   UNLOCK(&s->sig_lock);
@@ -3621,6 +3657,12 @@ static int SysExecve(struct Machine *m, i64 pa, i64 aa, i64 ea) {
   LOCK(&m->system->exec_lock);
   ExecveBlink(m, prog, argv, envp);
   SYS_LOGF("execve(%s)", prog);
+  if (g_prochost) {
+    // running a host program would replace every guest process
+    UNLOCK(&m->system->exec_lock);
+    if (VfsAccess(AT_FDCWD, prog, X_OK, 0) != -1) errno = ENOEXEC;
+    return -1;
+  }
   VfsExecve(prog, argv, envp);
   UNLOCK(&m->system->exec_lock);
   return -1;
@@ -3640,6 +3682,24 @@ static int SysWait4(struct Machine *m, int pid, i64 opt_out_wstatus_addr,
       (opt_out_rusage_addr &&
        !IsValidMemory(m, opt_out_rusage_addr, sizeof(grusage), PROT_WRITE))) {
     return -1;
+  }
+  if (g_prochost) {
+    // the host's WNOHANG etc. were translated above; the process host
+    // speaks linux, so pass the guest's own bits
+    options = (options & WNOHANG) ? 1 : 0;
+    RESTARTABLE(rc = ProcResult(g_prochost->Wait(m->system->pid, pid, options,
+                                                 &gwstatus, m)));
+    if (rc > 0) {
+      if (opt_out_wstatus_addr) {
+        Write32(gwstatusb, gwstatus);
+        CopyToUserWrite(m, opt_out_wstatus_addr, gwstatusb, sizeof(gwstatusb));
+      }
+      if (opt_out_rusage_addr) {
+        memset(&grusage, 0, sizeof(grusage));
+        CopyToUserWrite(m, opt_out_rusage_addr, &grusage, sizeof(grusage));
+      }
+    }
+    return rc;
   }
 #ifdef HAVE_WAIT4
   RESTARTABLE(rc = wait4(pid, &wstatus, options, &hrusage));
@@ -3900,7 +3960,8 @@ static int SysSigaction(struct Machine *m, int sig, i64 act, i64 old,
     if (isignored) {
       m->signals &= ~((u64)1 << (sig - 1));
     }
-    if ((syssig = XlatSignal(sig)) != -1 && !IsBlinkSig(m->system, sig)) {
+    if (!g_prochost &&  // host dispositions are shared by all processes
+        (syssig = XlatSignal(sig)) != -1 && !IsBlinkSig(m->system, sig)) {
       sigfillset(&syshand.sa_mask);
       syshand.sa_flags = SA_SIGINFO;
       if (flags & SA_NOCLDSTOP_LINUX) syshand.sa_flags |= SA_NOCLDSTOP;
@@ -4929,6 +4990,10 @@ static int SysSigpending(struct Machine *m, i64 setaddr) {
 }
 
 static int SysKill(struct Machine *m, int pid, int sig) {
+  if (g_prochost) {
+    if (!(0 <= sig && sig <= 64)) return einval();
+    return ProcResult(g_prochost->Kill(m->system->pid, pid, sig));
+  }
   return kill(pid, sig ? XlatSignal(sig) : 0);
 }
 
@@ -4949,6 +5014,11 @@ static int SysTkill(struct Machine *m, int tid, int sig) {
   // trigger signal immediately if possible
   if (tid == m->tid) {
     if (sig == SIGSTOP_LINUX || sig == SIGKILL_LINUX) {
+      if (g_prochost) {
+        // a host raise() would hit every guest process
+        if (sig == SIGKILL_LINUX) ExitProcess(m, SIGKILL_LINUX);
+        return 0;
+      }
       return raise(XlatSignal(sig));
     } else if (~m->sigmask & ((u64)1 << (sig - 1))) {
       LOCK(&m->system->sig_lock);
@@ -5021,7 +5091,7 @@ static int SysTkill(struct Machine *m, int tid, int sig) {
 
 static int SysTgkill(struct Machine *m, int pid, int tid, int sig) {
   if (pid < 1 || tid < 1) return einval();
-  if (pid != m->system->pid) return eperm();
+  if (pid != m->system->pid) return g_prochost ? SysKill(m, pid, sig) : eperm();
 #ifdef HAVE_THREADS
   return SysTkill(m, tid, sig);
 #else
@@ -5037,10 +5107,12 @@ static int SysPause(struct Machine *m) {
 }
 
 static int SysSetsid(struct Machine *m) {
+  if (g_prochost) return ProcResult(g_prochost->Setsid(m->system->pid));
   return setsid();
 }
 
 static i32 SysGetsid(struct Machine *m, i32 pid) {
+  if (g_prochost) return ProcResult(g_prochost->Getsid(m->system->pid, pid));
   return getsid(pid);
 }
 
@@ -5053,6 +5125,7 @@ static int SysGettid(struct Machine *m) {
 }
 
 static int SysGetppid(struct Machine *m) {
+  if (g_prochost) return ProcResult(g_prochost->Getppid(m->system->pid));
   return getppid();
 }
 
@@ -5262,11 +5335,12 @@ static int SysSetgid(struct Machine *m, int gid) {
 }
 
 static int SysGetpgid(struct Machine *m, int pid) {
+  if (g_prochost) return ProcResult(g_prochost->Getpgid(m->system->pid, pid));
   return getpgid(pid);
 }
 
 static int SysGetpgrp(struct Machine *m) {
-  return getpgid(0);
+  return SysGetpgid(m, 0);
 }
 
 static int SysAlarm(struct Machine *m, unsigned seconds) {
@@ -5274,6 +5348,9 @@ static int SysAlarm(struct Machine *m, unsigned seconds) {
 }
 
 static int SysSetpgid(struct Machine *m, int pid, int gid) {
+  if (g_prochost) {
+    return ProcResult(g_prochost->Setpgid(m->system->pid, pid, gid));
+  }
   return setpgid(pid, gid);
 }
 

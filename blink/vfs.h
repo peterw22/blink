@@ -35,7 +35,6 @@ struct VfsMap;
 struct Vfs {
   struct Dll *devices GUARDED_BY(lock);
   struct Dll *systems GUARDED_BY(lock);
-  struct Dll *fds GUARDED_BY(lock);
   struct Dll *maps GUARDED_BY(mapslock);
   pthread_mutex_t_ lock;
   pthread_mutex_t_ mapslock;
@@ -179,7 +178,20 @@ struct VfsInfo {
 };
 
 extern struct Vfs g_vfs;
-extern struct VfsInfo *g_cwdinfo;
+// Per guest process VFS state. Each System points at one; exec keeps it,
+// fork copies it. Before any System exists, the initial one is used.
+struct VfsProc {
+  _Atomic(int) refs;  // Systems sharing it (exec briefly has two)
+  struct Dll *fds;
+  struct VfsInfo *cwd;
+  struct VfsInfo *exe;  // for /proc/self/exe
+};
+struct VfsProc *VfsCurrentProc(void);
+bool VfsIsMountPoint(struct VfsInfo *);
+struct VfsProc *VfsInitialProc(void);
+struct VfsProc *VfsForkProc(struct VfsProc *);
+void VfsFreeProc(struct VfsProc *);
+#define g_cwdinfo (VfsCurrentProc()->cwd)
 extern struct VfsInfo *g_rootinfo;
 extern struct VfsInfo *g_actualrootinfo;
 

@@ -68,7 +68,8 @@ u8 *GetPageAddress(struct System *s, u64 entry, bool is_cr3) {
   }
 }
 
-u64 HandlePageFault(struct Machine *m, u8 *pslot, u64 entry) {
+static u64 HandlePageFault(struct Machine *m, i64 virt, u8 *pslot,
+                           u64 entry) {
   u64 x, page;
   unassert(entry & PAGE_RSRV);
   unassert(!HasLinearMapping());
@@ -97,6 +98,14 @@ u64 HandlePageFault(struct Machine *m, u8 *pslot, u64 entry) {
         entry = 0;
         break;
       }
+      if ((entry & PAGE_FILE) &&
+          !FillFilePage(m->system, virt, FindHostPage(page))) {
+        FreeAnonymousPage(m->system, FindHostPage(page));
+        m->system->rss -= 1;
+        m->segvcode = SEGV_MAPERR_LINUX;
+        entry = 0;
+        break;
+      }
       x = (page & (PAGE_TA | PAGE_HOST)) | (entry & ~(PAGE_TA | PAGE_RSRV));
       if (CasPte(pslot, entry, x)) {
         m->system->memstat.committed += 1;
@@ -105,6 +114,7 @@ u64 HandlePageFault(struct Machine *m, u8 *pslot, u64 entry) {
       } else {
         // another thread won the race; return our page to the pool. In
         // non-linear mode PAGE_TA holds an index, not the host pointer.
+        if (entry & PAGE_FILE) memset(FindHostPage(page), 0, 4096);
         FreeAnonymousPage(m->system, FindHostPage(page));
         entry = LoadPte(pslot);
         m->system->rss -= 1;
@@ -228,7 +238,8 @@ TryAgain:
       break;
     }
   } while ((level -= 9) >= 12);
-  if ((entry & PAGE_RSRV) && !(entry = HandlePageFault(m, pslot, entry))) {
+  if ((entry & PAGE_RSRV) &&
+      !(entry = HandlePageFault(m, page, pslot, entry))) {
     return 0;
   }
   // system calls lock the pages they access

@@ -564,6 +564,7 @@ bool CreatePath(P) {
       if (!pte || (pte & PAGE_RW)) return false;
     }
     if ((m->path.jb = StartJit(&m->system->jit, pc))) {
+      ResetJitter();
       JIP_LOGF("starting new path jit_pc:%" PRIxPTR " at pc:%" PRIx64,
                GetJitPc(m->path.jb), pc);
       FlushCod(m->path.jb);
@@ -628,6 +629,7 @@ void AbandonPath(struct Machine *m) {
   AbandonJit(&m->system->jit, m->path.jb);
   m->path.skew = 0;
   m->path.jb = 0;
+  ResetJitter();
 }
 
 void FlushSkew(P) {
@@ -644,6 +646,7 @@ void FlushSkew(P) {
 }
 
 void AddPath_StartOp(P) {
+  ResetJitter();  // no operands carry over between instructions
 #if LOG_CPU
   Jitter(A, "qmq", LogCpu);
 #endif

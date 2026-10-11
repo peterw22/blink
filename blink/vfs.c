@@ -33,6 +33,7 @@
 #include "blink/hostfs.h"
 #include "blink/linux.h"
 #include "blink/log.h"
+#include "blink/machine.h"
 #include "blink/macros.h"
 #include "blink/procfs.h"
 #include "blink/thread.h"
@@ -80,14 +81,25 @@ static struct VfsInfo g_initialrootinfo = {
     .refcount = 1u,
 };
 
-struct VfsInfo *g_cwdinfo;
+static struct VfsProc g_vfsinitial = {1};
+
+struct VfsProc *VfsInitialProc(void) {
+  return &g_vfsinitial;
+}
+
+struct VfsProc *VfsCurrentProc(void) {
+  struct VfsProc *p;
+  if (g_machine && (p = (struct VfsProc *)g_machine->system->vfsproc)) {
+    return p;
+  }
+  return &g_vfsinitial;
+}
 struct VfsInfo *g_rootinfo;
 struct VfsInfo *g_actualrootinfo;
 
 struct Vfs g_vfs = {
     .devices = NULL,
     .systems = NULL,
-    .fds = NULL,
     .maps = NULL,
     .lock = PTHREAD_MUTEX_INITIALIZER_,
     .mapslock = PTHREAD_MUTEX_INITIALIZER_,
@@ -471,6 +483,25 @@ int VfsFreeInfo(struct VfsInfo *info) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+/**
+ * Returns true if another filesystem is mounted on directory `info`.
+ */
+bool VfsIsMountPoint(struct VfsInfo *info) {
+  bool res = false;
+  struct Dll *e;
+  if (!S_ISDIR(info->mode)) return false;
+  LOCK(&g_vfs.lock);
+  for (e = dll_first(info->device->mounts); e;
+       e = dll_next(info->device->mounts, e)) {
+    if (VFS_MOUNT_CONTAINER(e)->baseino == info->ino) {
+      res = true;
+      break;
+    }
+  }
+  UNLOCK(&g_vfs.lock);
+  return res;
+}
+
 static int VfsTraverseMount(struct VfsInfo **info,
                             char childname[VFS_NAME_MAX]) {
   struct VfsMount *mount;
@@ -726,6 +757,59 @@ ssize_t VfsPathBuild(struct VfsInfo *info, struct VfsInfo *root, bool absolute,
 
 ////////////////////////////////////////////////////////////////////////////////
 
+/**
+ * Creates the VFS state for a child process: a duplicate of every fd
+ * (sharing the open file description, like fork) and the same cwd.
+ */
+struct VfsProc *VfsForkProc(struct VfsProc *parent) {
+  struct Dll *e;
+  struct VfsProc *child;
+  struct VfsFd *vfsfd, *copy;
+  struct VfsInfo *newinfo;
+  if (!(child = (struct VfsProc *)calloc(1, sizeof(*child)))) return 0;
+  child->refs = 1;
+  LOCK(&g_vfs.lock);
+  for (e = dll_first(parent->fds); e; e = dll_next(parent->fds, e)) {
+    vfsfd = VFS_FD_CONTAINER(e);
+    if (!vfsfd->data->device->ops->Dup ||
+        vfsfd->data->device->ops->Dup(vfsfd->data, &newinfo) == -1) {
+      LOGF("failed to inherit fd %d into child process", vfsfd->fd);
+      continue;
+    }
+    unassert((copy = (struct VfsFd *)malloc(sizeof(*copy))));
+    copy->fd = vfsfd->fd;
+    copy->data = newinfo;
+    dll_init(&copy->elem);
+    dll_make_last(&child->fds, &copy->elem);
+  }
+  UNLOCK(&g_vfs.lock);
+  unassert(!VfsAcquireInfo(parent->cwd, &child->cwd));
+  unassert(!VfsAcquireInfo(parent->exe, &child->exe));
+  return child;
+}
+
+/**
+ * Drops a reference to a process's VFS state, closing its fds when it
+ * was the last one (i.e. the process exited).
+ */
+void VfsFreeProc(struct VfsProc *p) {
+  struct Dll *e;
+  struct VfsFd *vfsfd;
+  if (!p || atomic_fetch_sub(&p->refs, 1) != 1) return;
+  while ((e = dll_first(p->fds))) {
+    vfsfd = VFS_FD_CONTAINER(e);
+    dll_remove(&p->fds, e);
+    if (!vfsfd->data->device->ops->Close ||
+        vfsfd->data->device->ops->Close(vfsfd->data) != -1) {
+      unassert(!VfsFreeInfo(vfsfd->data));
+    }
+    free(vfsfd);
+  }
+  unassert(!VfsFreeInfo(p->cwd));
+  unassert(!VfsFreeInfo(p->exe));
+  if (p != &g_vfsinitial) free(p);
+}
+
 int VfsAddFdAtOrAfter(struct VfsInfo *data, int minfd) {
   struct VfsFd *vfsfd;
   struct Dll *e;
@@ -735,7 +819,7 @@ int VfsAddFdAtOrAfter(struct VfsInfo *data, int minfd) {
   }
   vfsfd->data = data;
   LOCK(&g_vfs.lock);
-  for (e = dll_first(g_vfs.fds); e; e = dll_next(g_vfs.fds, e)) {
+  for (e = dll_first(VfsCurrentProc()->fds); e; e = dll_next(VfsCurrentProc()->fds, e)) {
     if (VFS_FD_CONTAINER(e)->fd < minfd) {
       continue;
     } else if (VFS_FD_CONTAINER(e)->fd == minfd) {
@@ -747,11 +831,11 @@ int VfsAddFdAtOrAfter(struct VfsInfo *data, int minfd) {
   vfsfd->fd = minfd;
   dll_init(&vfsfd->elem);
   if (e == NULL) {
-    dll_make_last(&g_vfs.fds, &vfsfd->elem);
+    dll_make_last(&VfsCurrentProc()->fds, &vfsfd->elem);
   } else {
-    e = dll_prev(g_vfs.fds, e);
+    e = dll_prev(VfsCurrentProc()->fds, e);
     if (e == NULL) {
-      dll_make_first(&g_vfs.fds, &vfsfd->elem);
+      dll_make_first(&VfsCurrentProc()->fds, &vfsfd->elem);
     } else {
       dll_splice_after(e, &vfsfd->elem);
     }
@@ -772,17 +856,17 @@ int VfsFreeFd(int fd, struct VfsInfo **data) {
   struct Dll *e;
   struct VfsFd *vfsfd;
   LOCK(&g_vfs.lock);
-  for (e = dll_first(g_vfs.fds); e;) {
+  for (e = dll_first(VfsCurrentProc()->fds); e;) {
     vfsfd = VFS_FD_CONTAINER(e);
     if (VFS_FD_CONTAINER(e)->fd == fd) {
       *data = vfsfd->data;
-      dll_remove(&g_vfs.fds, &vfsfd->elem);
+      dll_remove(&VfsCurrentProc()->fds, &vfsfd->elem);
       free(vfsfd);
       VFS_LOGF("VfsFreeFd(%d)", fd);
       UNLOCK(&g_vfs.lock);
       return 0;
     }
-    e = dll_next(g_vfs.fds, e);
+    e = dll_next(VfsCurrentProc()->fds, e);
   }
   UNLOCK(&g_vfs.lock);
   return ebadf();
@@ -791,7 +875,7 @@ int VfsFreeFd(int fd, struct VfsInfo **data) {
 int VfsGetFd(int fd, struct VfsInfo **output) {
   struct Dll *e;
   LOCK(&g_vfs.lock);
-  for (e = dll_first(g_vfs.fds); e; e = dll_next(g_vfs.fds, e)) {
+  for (e = dll_first(VfsCurrentProc()->fds); e; e = dll_next(VfsCurrentProc()->fds, e)) {
     if (VFS_FD_CONTAINER(e)->fd == fd) {
       UNLOCK(&g_vfs.lock);
       unassert(!VfsAcquireInfo(VFS_FD_CONTAINER(e)->data, output));
@@ -807,7 +891,7 @@ int VfsNthFd(int n) {
   int fd = -1;
   struct Dll *e;
   LOCK(&g_vfs.lock);
-  for (e = dll_first(g_vfs.fds); e; e = dll_next(g_vfs.fds, e)) {
+  for (e = dll_first(VfsCurrentProc()->fds); e; e = dll_next(VfsCurrentProc()->fds, e)) {
     if (!n--) {
       fd = VFS_FD_CONTAINER(e)->fd;
       break;
@@ -821,7 +905,7 @@ int VfsSetFd(int fd, struct VfsInfo *data) {
   struct Dll *e;
   struct VfsFd *vfsfd;
   LOCK(&g_vfs.lock);
-  for (e = dll_first(g_vfs.fds); e; e = dll_next(g_vfs.fds, e)) {
+  for (e = dll_first(VfsCurrentProc()->fds); e; e = dll_next(VfsCurrentProc()->fds, e)) {
     if (VFS_FD_CONTAINER(e)->fd == fd) {
       unassert(!VfsFreeInfo(VFS_FD_CONTAINER(e)->data));
       VFS_FD_CONTAINER(e)->data = data;
@@ -840,11 +924,11 @@ int VfsSetFd(int fd, struct VfsInfo *data) {
   vfsfd->fd = fd;
   dll_init(&vfsfd->elem);
   if (e == NULL) {
-    dll_make_last(&g_vfs.fds, &vfsfd->elem);
-  } else if ((e = dll_prev(g_vfs.fds, e))) {
+    dll_make_last(&VfsCurrentProc()->fds, &vfsfd->elem);
+  } else if ((e = dll_prev(VfsCurrentProc()->fds, e))) {
     dll_splice_after(e, &vfsfd->elem);
   } else {
-    dll_make_first(&g_vfs.fds, &vfsfd->elem);
+    dll_make_first(&VfsCurrentProc()->fds, &vfsfd->elem);
   }
   UNLOCK(&g_vfs.lock);
   return 0;
@@ -981,7 +1065,10 @@ static int VfsHandleDirfdName(int dirfd, const char *name,
     dir = tmp;
     memcpy(leaf, ".", 2);
   } else {
-    memcpy(leaf, q, p - q + 1);
+    // "dir/" names dir; drop the trailing slashes from the leaf name
+    while (p - q > 1 && p[-1] == '/') --p;
+    memcpy(leaf, q, p - q);
+    leaf[p - q] = '\0';
   }
   *parent = dir;
   free(parentname);
@@ -1272,6 +1359,9 @@ int VfsStat(int dirfd, const char *name, struct stat *st, int flags) {
   }
   if (VfsHandleDirfdName(dirfd, name, &dir, newname) == -1) {
     return -1;
+  }
+  if (*name && name[strlen(name) - 1] == '/') {
+    flags &= ~AT_SYMLINK_NOFOLLOW;  // "link/" always means its target
   }
   if (!(flags & AT_SYMLINK_NOFOLLOW)) {
     ret = VfsHandleDirfdSymlink(&dir, newname);
@@ -1985,12 +2075,12 @@ int VfsClosedir(DIR *dir) {
     ret = info->device->ops->Closedir(info);
     if (ret != -1) {
       LOCK(&g_vfs.lock);
-      for (e = dll_first(g_vfs.fds); e;) {
+      for (e = dll_first(VfsCurrentProc()->fds); e;) {
         vfsfd = VFS_FD_CONTAINER(e);
-        e = dll_next(g_vfs.fds, e);
+        e = dll_next(VfsCurrentProc()->fds, e);
         if (vfsfd->data == info) {
           unassert(!VfsFreeInfo(vfsfd->data));
-          dll_remove(&g_vfs.fds, &vfsfd->elem);
+          dll_remove(&VfsCurrentProc()->fds, &vfsfd->elem);
           free(vfsfd);
           break;
         }

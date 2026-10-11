@@ -41,6 +41,8 @@
 #include "blink/timespec.h"
 #include "blink/types.h"
 #include "blink/util.h"
+#include "blink/procs.h"
+#include "blink/vfs.h"
 #include "blink/x86.h"
 
 struct Allocator {
@@ -111,8 +113,35 @@ static size_t GetBigSize(size_t n) {
   return ROUNDUP(n, z);
 }
 
+static void CloseFileMapSource(void *src) {
+#ifndef DISABLE_VFS
+  struct VfsInfo *info = (struct VfsInfo *)src;
+  if (!info) return;
+  if (info->device->ops->Close) info->device->ops->Close(info);
+  unassert(!VfsFreeInfo(info));
+#endif
+}
+
+// Returns a private handle on guest fd's file, for reading in pages of a
+// private file mapping lazily, or null if pages must be mapped instead.
+static void *OpenFileMapSource(int fd) {
+#ifndef DISABLE_VFS
+  struct VfsInfo *info, *dup = 0;
+  if (VfsGetFd(fd, &info) == -1) return 0;
+  if (S_ISREG(info->mode) && info->device->ops->Dup &&
+      info->device->ops->Pread && info->device->ops->Dup(info, &dup) == -1) {
+    dup = 0;
+  }
+  unassert(!VfsFreeInfo(info));
+  return dup;
+#else
+  return 0;
+#endif
+}
+
 static void FreeFileMap(struct FileMap *fm) {
   if (fm) {
+    CloseFileMapSource(fm->src);
     free(fm->present);
     free(fm->path);
     free(fm);
@@ -220,6 +249,7 @@ long GetMaxRss(struct System *s) {
 struct System *NewSystem(struct XedMachineMode mode) {
   long i;
   struct System *s;
+  void *vfsproc = g_machine ? g_machine->system->vfsproc : 0;
   unassert(mode.omode == XED_MODE_REAL ||    //
            mode.omode == XED_MODE_LEGACY ||  //
            mode.omode == XED_MODE_LONG);
@@ -250,6 +280,7 @@ struct System *NewSystem(struct XedMachineMode mode) {
   InitFds(&s->fds);
   unassert(!pthread_mutex_init(&s->sig_lock, 0));
   unassert(!pthread_mutex_init(&s->mmap_lock, 0));
+  unassert(!pthread_mutex_init(&s->filemaps_lock, 0));
   unassert(!pthread_mutex_init(&s->exec_lock, 0));
   unassert(!pthread_cond_init(&s->machines_cond, 0));
   unassert(!pthread_mutex_init(&s->machines_lock, 0));
@@ -267,6 +298,10 @@ struct System *NewSystem(struct XedMachineMode mode) {
     Write64(s->rlim[i].max, RLIM_INFINITY_LINUX);
   }
   s->pid = getpid();
+#ifndef DISABLE_VFS
+  s->vfsproc = vfsproc ? vfsproc : VfsInitialProc();
+  atomic_fetch_add(&((struct VfsProc *)s->vfsproc)->refs, 1);
+#endif
   return s;
 }
 
@@ -322,7 +357,9 @@ StartOver:
                  m->tid);
         atomic_store_explicit(&m->killed, true, memory_order_release);
         atomic_store_explicit(&m->attention, true, memory_order_release);
-        if (t < 10) {
+        if (t < 10 || g_prochost) {
+          // with in-process guest processes, a host SIGKILL would take
+          // all of them down, so keep asking politely
           pthread_kill(m->thread, SIGSYS);
         } else {
           LOGF("kill9'd thread after 10 tries");
@@ -361,22 +398,26 @@ void RemoveOtherThreads(struct System *s) {
 void FreeSystem(struct System *s) {
   THR_LOGF("pid=%d FreeSystem", s->pid);
   unassert(dll_is_empty(s->machines));  // Use KillOtherThreads & FreeMachine
-  FreeHostPages(s);
+  if (!s->borrowedmm) FreeHostPages(s);
   unassert(!pthread_mutex_destroy(&s->machines_lock));
   unassert(!pthread_cond_destroy(&s->machines_cond));
   unassert(!pthread_mutex_destroy(&s->pagelocks_lock));
   unassert(!pthread_cond_destroy(&s->pagelocks_cond));
   unassert(!pthread_mutex_destroy(&s->exec_lock));
   unassert(!pthread_mutex_destroy(&s->mmap_lock));
+  FreeFileMaps(s);
+  unassert(!pthread_mutex_destroy(&s->filemaps_lock));
   // TODO(jart): Figure out why sig_lock sometimes fails to destroy
   (void)pthread_mutex_destroy(&s->sig_lock);
   free(s->elf.interpreter);
   DestroyFds(&s->fds);
   free(s->elf.execfn);
   free(s->elf.prog);
-  FreeFileMaps(s);
 #ifdef HAVE_JIT
   DestroyJit(&s->jit);
+#endif
+#ifndef DISABLE_VFS
+  VfsFreeProc((struct VfsProc *)s->vfsproc);
 #endif
   free(s);
 }
@@ -534,6 +575,7 @@ struct FileMap *AddFileMap(struct System *s, i64 virt, i64 size,
   size_t pages, words;
   if (!path) return 0;
   if ((fm = (struct FileMap *)calloc(1, sizeof(struct FileMap)))) {
+    LOCK(&s->filemaps_lock);
     fm->virt = virt;
     fm->size = size;
     fm->path = strdup(path);
@@ -548,13 +590,82 @@ struct FileMap *AddFileMap(struct System *s, i64 virt, i64 size,
       fm->pages = pages;
       dll_init(&fm->elem);
       dll_make_first(&s->filemaps, &fm->elem);
+      UNLOCK(&s->filemaps_lock);
       ELF_LOGF("AddFileMap(%#" PRIx64 ", %#" PRIx64 ", %s, %#" PRIx64 ")", virt,
                size, path, offset);
       return fm;
     }
+    UNLOCK(&s->filemaps_lock);
   }
   FreeFileMap(fm);
   return 0;
+}
+
+// Gives a file map the source its pages are lazily read from. The loader
+// creates file maps itself, so one may already exist for this mapping.
+static void SetFileMapSource(struct System *s, i64 virt, i64 size, int fildes,
+                             i64 offset, void *src) {
+  char *path;
+  struct Fd *fd;
+  struct Dll *e;
+  struct FileMap *fm;
+  LOCK(&s->filemaps_lock);
+  for (e = dll_first(s->filemaps); e; e = dll_next(s->filemaps, e)) {
+    fm = FILEMAP_CONTAINER(e);
+    if (fm->virt == virt && fm->offset == offset && !fm->src) {
+      fm->src = src;
+      UNLOCK(&s->filemaps_lock);
+      return;
+    }
+  }
+  UNLOCK(&s->filemaps_lock);
+  LOCK(&s->fds.lock);
+  path = (fd = GetFd(&s->fds, fildes)) && fd->path ? strdup(fd->path) : 0;
+  UNLOCK(&s->fds.lock);
+  unassert((fm = AddFileMap(s, virt, size, path ? path : "", offset)));
+  free(path);
+  LOCK(&s->filemaps_lock);
+  fm->src = src;
+  UNLOCK(&s->filemaps_lock);
+}
+
+/**
+ * Reads the content of a lazily loaded file page into `page`.
+ *
+ * Pages of file maps without a source (e.g. the stack, which is named
+ * using a file map) are left as they are, i.e. zero.
+ */
+bool FillFilePage(struct System *s, i64 virt, u8 *page) {
+  i64 off;
+  u64 i;
+  ssize_t got;
+  size_t have;
+  struct Dll *e;
+  struct FileMap *fm;
+  struct VfsInfo *src;
+  if (s->borrowedmm) s = s->mmowner;  // vfork() child
+  LOCK(&s->filemaps_lock);
+  for (e = dll_first(s->filemaps); e; e = dll_next(s->filemaps, e)) {
+    fm = FILEMAP_CONTAINER(e);
+    if (!(virt >= fm->virt && virt < fm->virt + fm->size)) continue;
+    i = (virt - fm->virt) / 4096;
+    if (!(fm->present[i / 64] & ((u64)1 << (i % 64)))) continue;
+    if (!fm->src) break;
+    {
+      off = fm->offset + (virt - fm->virt);
+      src = (struct VfsInfo *)fm->src;
+      // bytes past the end of the file read as zero
+      for (have = 0; have < 4096; have += got) {
+        got = src->device->ops->Pread(src, page + have, 4096 - have,
+                                      off + have);
+        if (got <= 0) break;
+      }
+      UNLOCK(&s->filemaps_lock);
+      return true;
+    }
+  }
+  UNLOCK(&s->filemaps_lock);
+  return true;
 }
 
 static void AddFileMapViaMap(struct System *s, i64 virt, i64 size, int fildes,
@@ -595,6 +706,7 @@ static void UnmarkFilePage(struct System *s, i64 virt) {
   struct Dll *e;
   struct FileMap *fm;
   lru = false;
+  LOCK(&s->filemaps_lock);
   for (e = dll_first(s->filemaps); e; e = dll_next(s->filemaps, e)) {
     fm = FILEMAP_CONTAINER(e);
     if (virt >= fm->virt && virt < fm->virt + fm->size) {
@@ -615,6 +727,7 @@ static void UnmarkFilePage(struct System *s, i64 virt) {
     }
     lru = true;
   }
+  UNLOCK(&s->filemaps_lock);
 }
 
 static void WaitForPageToNotBeLocked(struct System *s, i64 virt, u8 *pte) {
@@ -801,6 +914,94 @@ static int DetermineHostProtection(int prot) {
   return sysprot;
 }
 
+// Returns the leaf page table slot for virt, creating tables as needed.
+static u8 *GetPteSlot(struct System *s, i64 virt) {
+  u8 *mi;
+  u64 pt;
+  long level;
+  for (pt = s->cr3, level = 39;; level -= 9) {
+    mi = GetPageAddress(s, pt, level == 39) + ((virt >> level) & 511) * 8;
+    if (level == 12) return mi;
+    pt = LoadPte(mi);
+    if (!(pt & PAGE_V)) {
+      if ((pt = AllocatePageTable(s)) == -1) return 0;
+      StorePte(mi, pt);
+    }
+  }
+}
+
+static int ForkPageTable(struct System *c, struct System *p, u64 table,
+                         long level, i64 base) {
+  u8 *mi, *slot;
+  long i;
+  i64 virt;
+  u64 pt, page, entry;
+  mi = GetPageAddress(p, table, level == 39);
+  for (i = 0; i < 512; ++i) {
+    pt = LoadPte(mi + i * 8);
+    if (!(pt & PAGE_V)) continue;
+    virt = base | (i64)i << level;
+    if (level > 12) {
+      if (ForkPageTable(c, p, pt, level - 9, virt) == -1) return -1;
+      continue;
+    }
+    virt = (i64)((u64)virt << 16) >> 16;  // sign extend 48-bit address
+    if ((pt & (PAGE_RSRV | PAGE_HOST)) == PAGE_RSRV) {
+      // anonymous memory that hasn't been touched yet
+      entry = pt & ~PAGE_LOCKS;
+      c->memstat.reserved += 1;
+    } else {
+      // copy the page, turning file and shared mappings into private
+      // anonymous memory (the host can't share its views across these)
+      if ((page = AllocateAnonymousPage(c)) == -1) return -1;
+      memcpy(FindHostPage(page), FindHostPage(pt), 4096);
+      entry = (page & (PAGE_TA | PAGE_HOST)) | PAGE_V |
+              (pt & (PAGE_RW | PAGE_U | PAGE_XD | PAGE_GROW));
+      c->memstat.committed += 1;
+    }
+    if (!(slot = GetPteSlot(c, virt))) return -1;
+    StorePte(slot, entry);
+    c->vss += 1;
+  }
+  return 0;
+}
+
+/**
+ * Copies the address space of parent `p` into the new System `c`, for an
+ * in-process fork(). Pages are copied eagerly. The caller should hold the
+ * parent's mmap_lock.
+ */
+int ForkVirtual(struct System *c, struct System *p) {
+  struct Dll *e;
+  struct FileMap *fm, *fm2;
+  struct VfsInfo *src;
+  unassert(!HasLinearMapping());
+  unassert(!c->cr3);
+  // pages not read in yet still need the files they come from
+  LOCK(&p->filemaps_lock);
+  for (e = dll_last(p->filemaps); e; e = dll_prev(p->filemaps, e)) {
+    fm = FILEMAP_CONTAINER(e);
+    if (!(fm2 = (struct FileMap *)calloc(1, sizeof(*fm2)))) break;
+    *fm2 = *fm;
+    fm2->path = strdup(fm->path);
+    fm2->present = (u64 *)malloc(ROUNDUP(ROUNDUP(fm->size, 4096) / 4096, 64) / 8);
+    memcpy(fm2->present, fm->present,
+           ROUNDUP(ROUNDUP(fm->size, 4096) / 4096, 64) / 8);
+    fm2->src = 0;
+    if ((src = (struct VfsInfo *)fm->src)) {
+      if (src->device->ops->Dup(src, (struct VfsInfo **)&fm2->src) == -1) {
+        fm2->src = 0;
+      }
+    }
+    dll_init(&fm2->elem);
+    dll_make_first(&c->filemaps, &fm2->elem);
+  }
+  UNLOCK(&p->filemaps_lock);
+  if (!p->cr3) return 0;
+  if ((c->cr3 = AllocatePageTable(c)) == -1) return enomem();
+  return ForkPageTable(c, p, p->cr3, 39, 0);
+}
+
 i64 ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
                    i64 offset, bool shared, bool fixedmap) {
   u8 *mi;
@@ -815,6 +1016,7 @@ i64 ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
   i64 ti, pt, end, pages, level, entry;
   bool executable_code_was_made_non_executable;
   struct ContiguousMemoryRanges ranges;
+  void *src;
 
   // we determine these
   unassert(!(flags & PAGE_TA));
@@ -936,6 +1138,13 @@ i64 ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
     flags |= PAGE_HOST | PAGE_MAP;
     vss_delta += pages;
     rss_delta += pages;
+  } else if (fd != -1 && !shared && (src = OpenFileMapSource(fd))) {
+    // private file mapping: pages are read in when first touched, which
+    // avoids a host mapping per page (hosts limit how many there can be)
+    vss_delta += pages;
+    s->memstat.reserved += pages;
+    flags |= PAGE_RSRV | PAGE_FILE;
+    SetFileMapSource(s, virt, size, fd, offset, src);
   } else if (fd != -1 || shared) {
     vss_delta += pages;
     s->memstat.reserved += pages;
