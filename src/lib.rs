@@ -98,3 +98,31 @@ where
     procs::install();
     run_with_env(args, env)
 }
+
+/// A guest running in this app (Windows): its terminal and its thread.
+#[cfg(windows)]
+pub struct Session {
+    /// keyboard input in (`push_input`), resizes (`set_winsize`)
+    pub terminal: std::sync::Arc<win::Tty>,
+    /// blink's thread; when the guest's first process exits, blink exits
+    /// the host process (for now)
+    pub thread: std::thread::JoinHandle<i32>,
+}
+
+/// Runs `argv` (a path inside the guest, then its arguments) in the Linux
+/// root filesystem at `root`, on a new thread. Everything the guest writes
+/// to its terminal goes to `output`.
+#[cfg(windows)]
+pub fn start(root: &str, argv: Vec<String>, env: Vec<String>, output: Box<dyn Fn(&[u8]) + Send + Sync>, rows: u16, cols: u16) -> Session {
+    let terminal = win::init_terminal(root, output, rows, cols);
+    *terminal.on_signal.lock().unwrap() = Some(Box::new(procs::signal_foreground));
+    procs::install();
+    let mut args = vec!["blink".to_string(), "-m".into(), "-C".into(), root.to_string()];
+    args.extend(argv);
+    let thread = std::thread::Builder::new()
+        .name("blink".into())
+        .stack_size(16 << 20)
+        .spawn(move || run_with_env(args, env))
+        .expect("failed to start blink's thread");
+    Session { terminal, thread }
+}

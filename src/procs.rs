@@ -117,6 +117,19 @@ pub fn install() {
         .expect("failed to start signal forwarding thread");
 }
 
+/// Sends `sig` to the initial process's process group, as a terminal does
+/// for ^C and window resizes.
+pub fn signal_foreground(sig: c_int) {
+    let pgid = {
+        let t = table();
+        match t.procs.get(&t.root) {
+            Some(root) => root.pgid,
+            None => return,
+        }
+    };
+    kill(0, -pgid, sig);
+}
+
 impl Table {
     fn allocate_pid(&mut self) -> i32 {
         loop {

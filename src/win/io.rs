@@ -493,6 +493,19 @@ pub fn read_file(f: &OpenFile, buf: &mut [u8]) -> Result<usize, c_int> {
         Obj::Pipe(p) => p.read(buf, f.nonblock()),
         Obj::Socket(s) => s.recv(buf, 0, f.nonblock()),
         Obj::Tty(t) => t.read(buf, f.nonblock()),
+        Obj::Epoll(_) => Err(errno::EINVAL),
+        Obj::EventFd(e) => e.read(buf, f.nonblock()),
+        Obj::Dev(d) => Ok(match d {
+            super::fs::Dev::Null => 0,
+            super::fs::Dev::Zero | super::fs::Dev::Full => {
+                buf.fill(0);
+                buf.len()
+            }
+            super::fs::Dev::Random => {
+                unsafe { super::misc::getrandom(buf.as_mut_ptr(), buf.len(), 0) };
+                buf.len()
+            }
+        }),
     }
 }
 
@@ -518,6 +531,10 @@ pub fn write_file(f: &OpenFile, buf: &[u8]) -> Result<usize, c_int> {
             t.write_out(buf);
             Ok(buf.len())
         }
+        Obj::Epoll(_) => Err(errno::EINVAL),
+        Obj::EventFd(e) => e.write(buf),
+        Obj::Dev(super::fs::Dev::Full) => Err(errno::ENOSPC),
+        Obj::Dev(_) => Ok(buf.len()),
     }
 }
 
@@ -709,13 +726,16 @@ fn std_ready(h: HANDLE, events: i16) -> i16 {
     re & (events | POLLHUP | POLLERR)
 }
 
-fn ready(f: &OpenFile, events: i16) -> i16 {
+pub(crate) fn ready(f: &OpenFile, events: i16) -> i16 {
     match &f.obj {
         Obj::File { .. } | Obj::Dir { .. } => events & (POLLIN | POLLOUT),
         Obj::Std { handle } => std_ready(*handle, events),
         Obj::Pipe(p) => p.poll(events),
         Obj::Socket(s) => s.poll(events),
         Obj::Tty(t) => (if t.available() > 0 { POLLIN } else { 0 } | POLLOUT) & events,
+        Obj::Dev(_) => events & (POLLIN | POLLOUT),
+        Obj::Epoll(e) => e.poll(events),
+        Obj::EventFd(e) => e.poll(events),
     }
 }
 

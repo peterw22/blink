@@ -38,6 +38,11 @@ pub enum Obj {
     Socket(super::net::Sock),
     /// the Xbox terminal (or a stand-in): see io.rs
     Tty(Arc<super::io::Tty>),
+    /// /dev/null and friends (fs.rs)
+    Dev(super::fs::Dev),
+    /// epoll instances and eventfds (epoll.rs)
+    Epoll(Arc<super::epoll::Epoll>),
+    EventFd(Arc<super::epoll::EventFd>),
 }
 
 // SAFETY: handles are process-wide; each object serializes its own use.

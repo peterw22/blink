@@ -103,7 +103,9 @@ pub unsafe extern "C" fn mmap(addr: *mut c_void, len: usize, prot: c_int, flags:
     let max = (base_off as u64 + view_len as u64) as u64;
     let h: HANDLE = file.unwrap_or(-1isize as HANDLE);
     let (hi, lo) = if file.is_some() { (0, 0) } else { ((max >> 32) as u32, max as u32) };
-    let section = unsafe { CreateFileMappingW(h, std::ptr::null(), if file.is_none() { PAGE_READWRITE } else { sec_prot }, hi, lo, std::ptr::null()) };
+    let _ = (hi, lo);
+    let size = if file.is_some() { 0 } else { max };
+    let section = unsafe { CreateFileMappingFromApp(h, std::ptr::null(), if file.is_none() { PAGE_READWRITE } else { sec_prot }, size, std::ptr::null()) };
     if section.is_null() {
         let e = unsafe { GetLastError() };
         super::trace!("mmap: CreateFileMapping(fd {fdn}, {len:#x} at {off:#x}) failed: {e}");
@@ -118,8 +120,10 @@ pub unsafe extern "C" fn mmap(addr: *mut c_void, len: usize, prot: c_int, flags:
     if exec {
         access |= FILE_MAP_EXECUTE;
     }
-    let hint = if flags & MAP_FIXED != 0 { (addr as usize).wrapping_sub(skew) as *const c_void } else { std::ptr::null() };
-    let view = unsafe { MapViewOfFileEx(section, access, (base_off as u64 >> 32) as u32, base_off as u32, view_len, hint) };
+    // MAP_FIXED file views would need MapViewOfFile3FromApp; blink's
+    // non-linear mode doesn't ask for them
+    let _ = addr;
+    let view = unsafe { MapViewOfFileFromApp(section, access, base_off as u64, view_len) };
     unsafe { CloseHandle(section) };
     if view.Value.is_null() {
         let e = unsafe { GetLastError() };
@@ -143,7 +147,7 @@ fn anon(addr: *mut c_void, len: usize, prot: c_int, flags: c_int) -> *mut c_void
         if inside {
             unsafe {
                 VirtualFree(addr, len, MEM_DECOMMIT);
-                if VirtualAlloc(addr, len, MEM_COMMIT, page_prot(prot)).is_null() {
+                if VirtualAllocFromApp(addr, len, MEM_COMMIT, page_prot(prot)).is_null() {
                     errno::set(errno::ENOMEM);
                     return MAP_FAILED;
                 }
@@ -153,7 +157,7 @@ fn anon(addr: *mut c_void, len: usize, prot: c_int, flags: c_int) -> *mut c_void
     }
     let hint = if flags & MAP_FIXED != 0 { addr as *const c_void } else { std::ptr::null() };
     let commit = if prot == 0 { MEM_RESERVE } else { MEM_RESERVE | MEM_COMMIT };
-    let p = unsafe { VirtualAlloc(hint, len, commit, page_prot(prot)) };
+    let p = unsafe { VirtualAllocFromApp(hint, len, commit, page_prot(prot)) };
     if p.is_null() {
         errno::set(errno::ENOMEM);
         return MAP_FAILED;
@@ -192,9 +196,9 @@ pub unsafe extern "C" fn munmap(addr: *mut c_void, len: usize) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mprotect(addr: *mut c_void, len: usize, prot: c_int) -> c_int {
     let mut old = 0u32;
-    if unsafe { VirtualProtect(addr, round_up(len.max(1), 4096), page_prot(prot), &mut old) } == 0 {
+    if unsafe { VirtualProtectFromApp(addr, round_up(len.max(1), 4096), page_prot(prot), &mut old) } == 0 {
         // pages that were decommitted (munmap'd parts): commit them again
-        if prot != 0 && !unsafe { VirtualAlloc(addr, len, MEM_COMMIT, page_prot(prot)) }.is_null() {
+        if prot != 0 && !unsafe { VirtualAllocFromApp(addr, len, MEM_COMMIT, page_prot(prot)) }.is_null() {
             return 0;
         }
         return errno::fail(errno::from_win32(unsafe { GetLastError() }));
@@ -244,4 +248,30 @@ pub unsafe extern "C" fn posix_memalign(out: *mut *mut c_void, align: usize, siz
     }
     unsafe { *out = p };
     0
+}
+
+/// Allocates blink's JIT code region (read-write; blink mprotects pages to
+/// read-execute as it fills them). UWP apps may only execute memory from
+/// VirtualAllocFromApp. The region goes within +/-2 GiB of this image so
+/// the JIT's calls into blink stay 5-byte rel32 calls.
+#[unsafe(no_mangle)]
+pub extern "C" fn blinkwin_alloc_jit(size: usize) -> *mut c_void {
+    let here = blinkwin_alloc_jit as usize;
+    let step = 64 << 20;
+    for i in 1..30usize {
+        for dir in [1isize, -1] {
+            let want = (here as isize + dir * (i * step) as isize) as usize & !0xffff;
+            let p = unsafe { VirtualAllocFromApp(want as *const c_void, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) };
+            if !p.is_null() {
+                REGIONS.lock().unwrap().insert(p as usize, Region::Anon { size });
+                return p;
+            }
+        }
+    }
+    // anywhere; blink falls back to absolute calls
+    let p = unsafe { VirtualAllocFromApp(std::ptr::null(), size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) };
+    if !p.is_null() {
+        REGIONS.lock().unwrap().insert(p as usize, Region::Anon { size });
+    }
+    p
 }

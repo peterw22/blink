@@ -39,6 +39,81 @@ pub const LINK_MAGIC: &[u8] = b"!<blink-symlink>\n";
 
 static CWD: Mutex<String> = Mutex::new(String::new());
 
+/// Where host paths under /dev go when the host has no /dev (Windows):
+/// a directory of placeholders; the nodes themselves are virtual (Dev).
+static DEV_DIR: Mutex<Option<String>> = Mutex::new(None);
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Dev {
+    Null,
+    Zero,
+    Full,
+    Random,
+}
+
+impl Dev {
+    fn rdev(self) -> u64 {
+        let minor = match self {
+            Dev::Null => 3,
+            Dev::Zero => 5,
+            Dev::Full => 7,
+            Dev::Random => 9,
+        };
+        (1 << 8) | minor
+    }
+}
+
+/// Makes `dir` the host's /dev: creates placeholders for the virtual
+/// devices and symlinks for /dev/std{in,out,err} and /dev/fd.
+pub fn make_dev_dir(dir: &str) {
+    let _ = std::fs::create_dir_all(dir);
+    for name in ["null", "zero", "full", "random", "urandom", "tty", "ptmx"] {
+        let p = format!("{dir}\\{name}");
+        if std::fs::metadata(&p).is_err() {
+            let _ = std::fs::write(&p, b"");
+        }
+    }
+    let _ = std::fs::create_dir_all(format!("{dir}\\pts"));
+    let _ = std::fs::create_dir_all(format!("{dir}\\shm"));
+    for (name, target) in [("stdin", "/proc/self/fd/0"), ("stdout", "/proc/self/fd/1"), ("stderr", "/proc/self/fd/2"), ("fd", "/proc/self/fd")] {
+        let p = std::path::PathBuf::from(format!("{dir}\\{name}"));
+        if std::fs::metadata(&p).is_err() {
+            let _ = super::rootfs::write_link(&p, target);
+        }
+    }
+    *DEV_DIR.lock().unwrap() = Some(dir.to_string());
+}
+
+enum DevNode {
+    Dev(Dev),
+    Tty,
+}
+
+/// The virtual device a resolved path names, if any.
+fn dev_node(path: &str) -> Option<DevNode> {
+    let d = DEV_DIR.lock().unwrap();
+    let dir = d.as_ref()?;
+    let (parent, name) = path.rsplit_once('\\')?;
+    if !parent.eq_ignore_ascii_case(dir) {
+        return None;
+    }
+    Some(match name {
+        "null" => DevNode::Dev(Dev::Null),
+        "zero" => DevNode::Dev(Dev::Zero),
+        "full" => DevNode::Dev(Dev::Full),
+        "random" | "urandom" => DevNode::Dev(Dev::Random),
+        "tty" => DevNode::Tty,
+        _ => return None,
+    })
+}
+
+static TERMINAL: Mutex<Option<std::sync::Arc<super::io::Tty>>> = Mutex::new(None);
+
+/// The terminal /dev/tty opens.
+pub fn set_terminal(t: std::sync::Arc<super::io::Tty>) {
+    *TERMINAL.lock().unwrap() = Some(t);
+}
+
 pub fn init() {
     let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "C:\\".into());
     *CWD.lock().unwrap() = cwd;
@@ -70,6 +145,11 @@ fn cwd() -> String {
     CWD.lock().unwrap().clone()
 }
 
+/// Sets the current directory without checking it (start-up).
+pub fn set_cwd_path(path: &str) {
+    *CWD.lock().unwrap() = path.replace('/', "\\");
+}
+
 /// A Windows path as blink should see it: forward slashes, and no drive
 /// letter when it's the current drive (resolve() puts it back).
 pub fn to_posix(win: &str) -> String {
@@ -86,6 +166,11 @@ pub fn to_posix(win: &str) -> String {
 /// Joins a Linux-style path onto the directory `dirfd` (or the cwd) and
 /// returns it as a Windows path.
 pub fn resolve(dirfd: c_int, path: &str) -> Result<String, c_int> {
+    if path == "/dev" || path.starts_with("/dev/") {
+        if let Some(dir) = DEV_DIR.lock().unwrap().as_ref() {
+            return Ok(format!("{dir}{}", path[4..].replace('/', "\\")).trim_end_matches('\\').to_string());
+        }
+    }
     let mut p = if is_absolute(path) {
         if path.starts_with('/') || path.starts_with('\\') {
             // root of the current drive, as Windows would
@@ -272,6 +357,17 @@ pub fn stat_handle(h: HANDLE, st: &mut Stat) -> Result<(), c_int> {
 }
 
 fn stat_path(path: &str, follow: bool, st: &mut Stat) -> Result<(), c_int> {
+    if let Some(node) = dev_node(path) {
+        *st = unsafe { std::mem::zeroed() };
+        st.st_mode = S_IFCHR | 0o666;
+        st.st_rdev = match node {
+            DevNode::Dev(d) => d.rdev(),
+            DevNode::Tty => 5 << 8,
+        };
+        st.st_nlink = 1;
+        st.st_blksize = 4096;
+        return Ok(());
+    }
     let h = Handle(open_handle(path, READ_ATTRIBUTES | GENERIC_READ, OPEN_EXISTING, BACKUP_SEMANTICS | if follow { 0 } else { OPEN_REPARSE })
         .or_else(|_| open_handle(path, READ_ATTRIBUTES, OPEN_EXISTING, BACKUP_SEMANTICS | if follow { 0 } else { OPEN_REPARSE }))?);
     stat_handle(h.0, st)
@@ -309,6 +405,15 @@ pub fn fstat_file(f: &OpenFile, st: &mut Stat) -> Result<(), c_int> {
         Obj::Tty(_) => {
             st.st_mode = S_IFCHR | 0o620;
             st.st_rdev = (136 << 8) | 0; // /dev/pts/0
+            Ok(())
+        }
+        Obj::Dev(d) => {
+            st.st_mode = S_IFCHR | 0o666;
+            st.st_rdev = d.rdev();
+            Ok(())
+        }
+        Obj::Epoll(_) | Obj::EventFd(_) => {
+            st.st_mode = 0o600; // anon_inode
             Ok(())
         }
     }
@@ -349,6 +454,16 @@ pub unsafe extern "C" fn lstat(path: *const c_char, st: *mut Stat) -> c_int {
 /// Opens `path` (already resolved) the way openat() would.
 pub fn open_path(path: &str, flags: u32) -> Result<std::sync::Arc<OpenFile>, c_int> {
     let acc = flags & O_ACCMODE;
+    match dev_node(path) {
+        Some(DevNode::Dev(d)) => return Ok(OpenFile::new(Obj::Dev(d), flags)),
+        Some(DevNode::Tty) => {
+            return match TERMINAL.lock().unwrap().clone() {
+                Some(t) => Ok(OpenFile::new(Obj::Tty(t), flags)),
+                None => Err(errno::ENXIO),
+            }
+        }
+        None => {}
+    }
     let mut access = READ_ATTRIBUTES | WRITE_ATTRIBUTES;
     if flags & O_PATH == 0 {
         access |= match acc {

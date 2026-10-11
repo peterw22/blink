@@ -23,5 +23,8 @@
 #define HAVE_MAP_SHARED
 #define HAVE_GETRANDOM
 #define HAVE_STRUCT_TIMEZONE
+// in-process epoll and eventfd (src/win/epoll.rs), for Bun
+#define HAVE_EPOLL_PWAIT1
+#define HAVE_EPOLL_PWAIT2
 
 #endif /* BLINK_CONFIG_H_ */
