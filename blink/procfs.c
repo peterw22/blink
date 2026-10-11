@@ -597,11 +597,52 @@ static int ProcfsAccess(struct VfsInfo *parent, const char *name, mode_t mode,
 
 ////////////////////////////////////////////////////////////////////////////////
 
+// A private copy of node `info` (its own ProcfsInfo, no open state yet), so
+// what an open file or directory keeps (position, read buffer) isn't shared
+// with other opens of the same node.
+static int ProcfsCloneInfo(struct VfsInfo *info, struct VfsInfo **output) {
+  struct ProcfsInfo *src = (struct ProcfsInfo *)info->data, *dst;
+  *output = NULL;
+  if (!(dst = (struct ProcfsInfo *)malloc(sizeof(*dst)))) return enomem();
+  *dst = *src;
+  dst->opendir = NULL;  // shares the union with openfile
+  if (VfsCreateInfo(output) == -1) {
+    free(dst);
+    return -1;
+  }
+  (*output)->data = dst;
+  (*output)->ino = info->ino;
+  (*output)->mode = info->mode;
+  (*output)->dev = info->dev;
+  unassert(!VfsAcquireDevice(info->device, &(*output)->device));
+  if (info->parent) {
+    unassert(!VfsAcquireInfo(info->parent, &(*output)->parent));
+  }
+  if (!((*output)->name = strdup(info->name ? info->name : ""))) {
+    unassert(!VfsFreeInfo(*output));
+    *output = NULL;
+    return enomem();
+  }
+  (*output)->namelen = strlen((*output)->name);
+  return 0;
+}
+
 static int ProcfsOpen(struct VfsInfo *parent, const char *name, int flags,
                       int mode, struct VfsInfo **output) {
   struct ProcfsInfo *procoutput = NULL;
+  struct VfsInfo *shared;
   if (ProcfsFinddir(parent, name, output) == -1) {
     return -1;
+  }
+  // "." finds the directory itself (for /proc, the mount's root), which
+  // other opens use too: open a private copy instead
+  if (*output == parent) {
+    shared = *output;
+    if (ProcfsCloneInfo(shared, output) == -1) {
+      unassert(!VfsFreeInfo(shared));
+      return -1;
+    }
+    unassert(!VfsFreeInfo(shared));
   }
   procoutput = (struct ProcfsInfo *)(*output)->data;
   if (S_ISDIR(procoutput->mode)) {
@@ -989,30 +1030,42 @@ static off_t ProcfsSeek(struct VfsInfo *info, off_t off, int whence) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+// Duplicates an open procfs file or directory: a private node with a copy
+// of the open state (reopening by name could hand back a node other opens
+// share, e.g. /proc itself, and closing either one would pull the state out
+// from under the other; in-process guest processes dup every fd on fork).
 static int ProcfsDup(struct VfsInfo *info, struct VfsInfo **newinfo) {
   struct ProcfsInfo *procinfo = (struct ProcfsInfo *)info->data, *newprocinfo;
-  u32 openflags = 0;
   *newinfo = NULL;
-  if (S_ISREG(info->mode)) {
-    openflags = procinfo->openfile->openflags & ~(O_CREAT | O_EXCL | O_TRUNC);
-  } else if (S_ISDIR(info->mode)) {
-    openflags = O_DIRECTORY;
-  } else {
+  if (!S_ISREG(info->mode) && !S_ISDIR(info->mode)) {
     return einval();
   }
-  if (ProcfsOpen(info->parent, info->name, openflags, 0, newinfo) == -1) {
+  if (ProcfsCloneInfo(info, newinfo) == -1) {
     return -1;
   }
   newprocinfo = (struct ProcfsInfo *)(*newinfo)->data;
   if (S_ISDIR(info->mode)) {
-    memcpy(newprocinfo->opendir, procinfo->opendir,
-           sizeof(*newprocinfo->opendir));
-  } else if (S_ISREG(info->mode)) {
-    memcpy(newprocinfo->openfile, procinfo->openfile,
-           sizeof(*newprocinfo->openfile));
+    struct ProcfsOpenDir *d;
+    if (!(d = (struct ProcfsOpenDir *)calloc(1, sizeof(*d)))) goto oom;
+    if (procinfo->opendir) d->index = procinfo->opendir->index;
+    unassert(!pthread_mutex_init(&d->lock, NULL));
+    newprocinfo->opendir = d;
+  } else {
+    struct ProcfsOpenFile *f;
+    if (!(f = (struct ProcfsOpenFile *)malloc(sizeof(*f)))) goto oom;
+    if (procinfo->openfile) {
+      memcpy(f, procinfo->openfile, sizeof(*f));
+    } else {
+      memset(f, 0, sizeof(*f));
+    }
+    unassert(!pthread_mutex_init(&f->lock, NULL));
+    newprocinfo->openfile = f;
   }
-  unassert(!pthread_mutex_init((pthread_mutex_t *)newprocinfo->openfile, NULL));
   return 0;
+oom:
+  unassert(!VfsFreeInfo(*newinfo));
+  *newinfo = NULL;
+  return enomem();
 }
 
 #ifdef HAVE_DUP3
