@@ -158,7 +158,12 @@ int VfsInit(const char *prefix) {
            strerror(errno));
       goto cleananddie;
     }
-    unassert(VfsMount("/", VFS_SYSTEM_ROOT_MOUNT, "hostfs", 0, NULL) != -1);
+    // sandboxes (like the Xbox's UWP apps) may not see the host's root;
+    // the guest then just doesn't get the host's files
+    if (VfsMount("/", VFS_SYSTEM_ROOT_MOUNT, "hostfs", 0, NULL) == -1) {
+      ERRF("can't mount the host's root at %s: %s", VFS_SYSTEM_ROOT_MOUNT,
+            strerror(errno));
+    }
   }
   unassert(!VfsFreeInfo(g_actualrootinfo));
   unassert(!VfsTraverse(bprefix ? VFS_SYSTEM_ROOT_MOUNT : "/",

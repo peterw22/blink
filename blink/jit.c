@@ -125,7 +125,15 @@ const u8 kJitSav[5] = {kJitSav0, kJitSav1, kJitSav2, kJitSav3, kJitSav4};
 #define MOVE_SRC(a)    ((0x00ff00 & (a)) >> 8)
 #define HASH(virt)     (virt)
 
+#ifdef _WIN32
+// Windows (the Xbox's UWP app) can only execute memory it allocated with
+// VirtualAllocFromApp, so the region is allocated, near the image (see
+// blinkwin_alloc_jit in blink-xbox), instead of being a static array.
+void *blinkwin_alloc_jit(size_t);
+static u8 *g_code;
+#else
 static u8 g_code[kJitMemorySize];
+#endif
 
 static struct JitGlobals {
   pthread_mutex_t_ lock;
@@ -629,6 +637,11 @@ static u8 *AllocateJitMemory(long *state) {
   long i, brk;
   uintptr_t p;
   brk = *state;
+#ifdef _WIN32
+  if (!g_code && !(g_code = (u8 *)blinkwin_alloc_jit(kJitMemorySize))) {
+    return 0;
+  }
+#endif
   p = (uintptr_t)g_code;
   i = ROUNDUP(p + brk, FLAG_pagesize) - p;
   if (i + kJitBlockSize > kJitMemorySize) {

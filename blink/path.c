@@ -722,8 +722,38 @@ void AddPath_EndOp(P) {
         0x74,
         0x05,
     };
-    AppendJit(m->path.jb, code, sizeof(code));
-    AppendJitCall(m->path.jb, (void *)(uintptr_t)CommitStash);
+    intptr_t disp = (intptr_t)(uintptr_t)CommitStash -
+                    (intptr_t)(GetJitPc(m->path.jb) + sizeof(code) + 5);
+    if (kAmdDispMin <= disp && disp <= kAmdDispMax) {
+      AppendJit(m->path.jb, code, sizeof(code));
+      AppendJitCall(m->path.jb, (void *)(uintptr_t)CommitStash);
+    } else {
+      // too far for a rel32 call: skip over movabs $CommitStash,%rax
+      // (10 bytes) and call *%rax (2 bytes) instead
+      u64 fn = (uintptr_t)CommitStash;
+      u8 far[] = {
+          0x48 | (kJitArg0 > 7 ? kAmdRexb : 0),
+          0x83,
+          0170 | (kJitArg0 & 7),
+          sa,
+          0x00,
+          0x74,
+          0x0c,  // jz +12
+          0x48,
+          0xb8,  // movabs $imm64,%rax
+          (u8)fn,
+          (u8)(fn >> 8),
+          (u8)(fn >> 16),
+          (u8)(fn >> 24),
+          (u8)(fn >> 32),
+          (u8)(fn >> 40),
+          (u8)(fn >> 48),
+          (u8)(fn >> 56),
+          0xff,
+          0xd0,  // call *%rax
+      };
+      AppendJit(m->path.jb, far, sizeof(far));
+    }
   }
 #elif !LOG_JIX && defined(__aarch64__)
   if (m->reserving) {

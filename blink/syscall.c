@@ -1348,9 +1348,14 @@ static i64 SysMmap(struct Machine *m, i64 virt, u64 size, int prot, int flags,
 
 static i64 SysMremap(struct Machine *m, i64 old_address, u64 old_size,
                      u64 new_size, int flags, i64 new_address) {
-  // would be nice to have
-  // avoid being noisy in the logs
-  // hope program has fallback for failure
+  // Moving and growing mappings isn't supported (programs fall back to
+  // mmap+copy), but fail like Linux: musl's pthread_getattr_np() finds the
+  // main thread's stack by mremap()ing pages downward until one fails with
+  // EFAULT (unmapped) rather than ENOMEM (mapped, can't grow).
+  if (old_address & 4095) return einval();
+  if (!old_size || !IsFullyMapped(m->system, old_address, old_size)) {
+    return efault();
+  }
   LOG_ONCE(MEM_LOGF("mremap() not supported yet"));
   return enomem();
 }
@@ -5483,7 +5488,7 @@ static i32 SysEpollCreate1(struct Machine *m, i32 flags) {
   return fildes;
 }
 
-#ifdef __linux
+#if defined(__linux) || defined(_WIN32)  // Windows: blink-xbox emulates it
 #include <sys/eventfd.h>
 static i32 SysEventfd2(struct Machine *m, u32 initval, i32 flags) {
   int lim, fildes, oflags = O_RDWR, sysflags = 0;
@@ -5897,7 +5902,7 @@ void OpSyscall(P) {
     SYSCALL(3, 0x1B4, "close_range", SysCloseRange, STRACE_3);
 #ifdef HAVE_EPOLL_PWAIT1
     SYSCALL(1, 0x0D5, "epoll_create", SysEpollCreate, STRACE_1);
-#ifdef __linux
+#if defined(__linux) || defined(_WIN32)
     SYSCALL(1, 0x11C, "eventfd", SysEventfd, STRACE_1);
     SYSCALL(2, 0x122, "eventfd2", SysEventfd2, STRACE_2);
 #endif
