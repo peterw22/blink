@@ -8,6 +8,9 @@
 use std::ffi::{c_char, c_int, CString};
 
 #[cfg(target_os = "linux")]
+mod procs;
+
+#[cfg(target_os = "linux")]
 extern "C" {
     /// blink's `main()` from blink/blink.c, renamed by build.rs.
     fn blink_c_main(argc: c_int, argv: *mut *mut c_char, envp: *mut *mut c_char) -> c_int;
@@ -34,6 +37,21 @@ where
     // SAFETY: argv is NUL-terminated and its strings outlive the call; blink
     // only reads argv/envp (it copies them onto the guest stack).
     unsafe { blink_c_main((argv.len() - 1) as c_int, argv.as_mut_ptr(), environ) }
+}
+
+/// Like `run()`, but guest processes created by fork()/vfork() run as
+/// threads of this host process instead of host processes, the way they
+/// must on the Xbox. Forces blink's non-linear memory mode (`-m`).
+#[cfg(target_os = "linux")]
+pub fn run_in_process<I, S>(args: I) -> i32
+where
+    I: IntoIterator<Item = S>,
+    S: Into<Vec<u8>>,
+{
+    let mut args: Vec<Vec<u8>> = args.into_iter().map(Into::into).collect();
+    args.insert(1.min(args.len()), b"-m".to_vec());
+    procs::install();
+    run(args)
 }
 
 #[cfg(not(target_os = "linux"))]
