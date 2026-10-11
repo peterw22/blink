@@ -160,7 +160,7 @@ void TerminateSignal(struct Machine *m, int sig, int code) {
            m->system->pid, DescribeSignal(sig), m->ip, code, m->faultaddr);
       PrintDiagnostics(m);
     }
-    ExitProcess(m, sig & 127);
+    ExitGuestProcess(m, sig & 127);
   }
   KillOtherThreads(m->system);
 #ifdef HAVE_JIT
@@ -384,7 +384,7 @@ void exit(int status) {
 }
 #endif
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[], char *envp[]) {
   SetupWeb();
   GetStartDir();
 #ifndef NDEBUG
@@ -428,5 +428,7 @@ int main(int argc, char *argv[]) {
     exit(EXIT_FAILURE_EXEC_FAILED);
   }
   argv[optind_] = g_pathbuf;
-  return Exec(g_pathbuf, g_pathbuf, argv + optind_ + FLAG_zero, environ);
+  // envp: embedders calling this main (blink-xbox) choose the guest's
+  // environment, which on Windows isn't the host's
+  return Exec(g_pathbuf, g_pathbuf, argv + optind_ + FLAG_zero, envp ? envp : environ);
 }

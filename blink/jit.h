@@ -26,7 +26,7 @@
 #ifdef __x86_64__
 #define kJitRes0 kAmdAx
 #define kJitRes1 kAmdDx
-#ifdef __CYGWIN__
+#ifdef WIN64_ABI
 #define kJitArg0 kAmdCx
 #define kJitArg1 kAmdDx
 #define kJitArg2 8

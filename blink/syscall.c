@@ -390,7 +390,7 @@ _Noreturn void SysExitGroup(struct Machine *m, int rc) {
   THR_LOGF("pid=%d tid=%d SysExitGroup", m->system->pid, m->tid);
   ClearChildTid(m);
   if (g_prochost) {
-    ExitProcess(m, (rc & 255) << 8);
+    ExitGuestProcess(m, (rc & 255) << 8);
   }
   if (m->system->isfork) {
 #ifndef NDEBUG
@@ -5016,7 +5016,7 @@ static int SysTkill(struct Machine *m, int tid, int sig) {
     if (sig == SIGSTOP_LINUX || sig == SIGKILL_LINUX) {
       if (g_prochost) {
         // a host raise() would hit every guest process
-        if (sig == SIGKILL_LINUX) ExitProcess(m, SIGKILL_LINUX);
+        if (sig == SIGKILL_LINUX) ExitGuestProcess(m, SIGKILL_LINUX);
         return 0;
       }
       return raise(XlatSignal(sig));
@@ -5829,14 +5829,15 @@ void OpSyscall(P) {
     SYSCALL(5, 0x036, "setsockopt", SysSetsockopt, STRACE_5);
     SYSCALL(5, 0x037, "getsockopt", SysGetsockopt, STRACE_5);
 #endif /* DISABLE_SOCKETS */
-#ifdef HAVE_FORK
+// guest processes come from the host's fork(), or run in-process (procs.c)
+#if defined(HAVE_FORK) || !defined(DISABLE_VFS)
     SYSCALL(0, 0x039, "fork", SysFork, STRACE_FORK);
 #ifndef DISABLE_NONPOSIX
     SYSCALL(0, 0x03A, "vfork", SysVfork, STRACE_VFORK);
 #endif
     SYSCALL(4, 0x03D, "wait4", SysWait4, STRACE_WAIT4);
     SYSCALL(2, 0x03E, "kill", SysKill, STRACE_KILL);
-#endif /* HAVE_FORK */
+#endif /* HAVE_FORK || !DISABLE_VFS */
 #ifdef HAVE_THREADS
     SYSCALL(6, 0x0CA, "futex", SysFutex, STRACE_FUTEX);
 #endif

@@ -90,8 +90,8 @@ void FuseOp(struct Machine *m, i64 pc) {
 static const u8 kEnter[] = {
     0x55,                    // push %rbp
     0x48, 0x89, 0345,        // mov  %rsp,%rbp
-#ifdef __CYGWIN__            //
-    0x48, 0x83, 0354, 0x40,  // sub  $0x40,%rsp
+#ifdef WIN64_ABI             // saves end at -0x38; below them goes the
+    0x48, 0x83, 0354, 0x60,  // sub  $0x60,%rsp  callees' 32-byte home space
     0x48, 0x89, 0175, 0xc8,  // mov  %rdi,-0x38(%rbp)
     0x48, 0x89, 0165, 0xd0,  // mov  %rsi,-0x30(%rbp)
 #else                        //
@@ -102,7 +102,7 @@ static const u8 kEnter[] = {
     0x4c, 0x89, 0155, 0xe8,  // mov  %r13,-0x18(%rbp)
     0x4c, 0x89, 0165, 0xf0,  // mov  %r14,-0x10(%rbp)
     0x4c, 0x89, 0175, 0xf8,  // mov  %r15,-0x08(%rbp)
-#ifdef __CYGWIN__            //
+#ifdef WIN64_ABI             //
     0x48, 0x89, 0313,        // mov  %rcx,%rbx
 #else                        //
     0x48, 0x89, 0373,        // mov  %rdi,%rbx
@@ -114,10 +114,10 @@ static const u8 kLeave[] = {
     0x4c, 0x8b, 0155, 0xe8,  // mov -0x18(%rbp),%r13
     0x4c, 0x8b, 0145, 0xe0,  // mov -0x20(%rbp),%r12
     0x48, 0x8b, 0135, 0xd8,  // mov -0x28(%rbp),%rbx
-#ifdef __CYGWIN__
+#ifdef WIN64_ABI
     0x48, 0x8b, 0165, 0xd0,  // mov -0x30(%rbp),%rsi
     0x48, 0x8b, 0175, 0xc8,  // mov -0x38(%rbp),%rdi
-    0x48, 0x83, 0304, 0x40,  // add $0x40,%rsp
+    0x48, 0x83, 0304, 0x60,  // add $0x60,%rsp
 #else
     0x48, 0x83, 0304, 0x30,  // add $0x30,%rsp
 #endif

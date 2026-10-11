@@ -295,12 +295,12 @@ int ForkProcess(struct Machine *m, u64 flags, u64 stack, u64 ctid) {
  *
  * @param wstatus is a linux wait status, e.g. `code << 8` or `signal`
  */
-_Noreturn void ExitProcess(struct Machine *m, int wstatus) {
+_Noreturn void ExitGuestProcess(struct Machine *m, int wstatus) {
   int pid;
   struct System *s;
   s = m->system;
   pid = s->pid;
-  THR_LOGF("pid=%d tid=%d ExitProcess(%#x)", pid, m->tid, wstatus);
+  THR_LOGF("pid=%d tid=%d ExitGuestProcess(%#x)", pid, m->tid, wstatus);
   if (pid == g_rootpid) {
     // the whole host process is going away; don't wait for threads
     g_prochost->Exit(pid, wstatus);
@@ -330,7 +330,7 @@ int ForkProcess(struct Machine *m, u64 flags, u64 stack, u64 ctid) {
   return enosys();
 }
 
-_Noreturn void ExitProcess(struct Machine *m, int wstatus) {
+_Noreturn void ExitGuestProcess(struct Machine *m, int wstatus) {
   _Exit(1);
 }
 

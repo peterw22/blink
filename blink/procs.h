@@ -48,6 +48,6 @@ int SignalSystem(struct System *, int);
 bool IsMachineInterrupted(struct Machine *);
 int TakeHostSignals(void);
 int ForkProcess(struct Machine *, u64, u64, u64);
-_Noreturn void ExitProcess(struct Machine *, int);
+_Noreturn void ExitGuestProcess(struct Machine *, int);
 
 #endif /* BLINK_PROCS_H_ */

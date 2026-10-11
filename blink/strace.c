@@ -156,7 +156,7 @@ static const struct DescribeFlagz kRenameFlags[] = {
 };
 #endif
 
-#ifdef HAVE_FORK
+#if defined(HAVE_FORK) || !defined(DISABLE_VFS)
 static const struct DescribeFlagz kWaitFlags[] = {
     {WNOHANG_LINUX, "WNOHANG"},          //
     {WUNTRACED_LINUX, "WUNTRACED"},      //
@@ -460,7 +460,7 @@ void Strace(struct Machine *m, const char *func, bool isentry, const char *fmt,
                       "", arg);
         APPEND("%s", tmp);
       }
-#ifdef HAVE_FORK
+#if defined(HAVE_FORK) || !defined(DISABLE_VFS)
     } else if (c == I32_WAITFLAGS[0]) {
       DescribeFlagz(tmp, sizeof(tmp), kWaitFlags, ARRAYLEN(kWaitFlags), "",
                     arg);

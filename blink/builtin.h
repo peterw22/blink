@@ -264,6 +264,13 @@
 #define HAVE_JIT
 #endif
 
+// The Windows x64 calling convention (Cygwin, or native Windows such as
+// the Xbox build): arguments in rcx/rdx/r8/r9, rdi/rsi callee-saved, and
+// 32 bytes of home space above the return address that callees may use.
+#if defined(__x86_64__) && (defined(__CYGWIN__) || defined(_WIN32))
+#define WIN64_ABI 1
+#endif
+
 #if defined(HAVE_JIT) && defined(__GNUC__) && !defined(__SANITIZE_ADDRESS__)
 #ifndef __OPTIMIZE__
 #define TRIVIALLY_RELOCATABLE \

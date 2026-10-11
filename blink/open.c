@@ -111,6 +111,12 @@ int SysOpenat(struct Machine *m, i32 dirfildes, i64 pathaddr, i32 oflags,
   int sysflags;
   struct Fd *fd;
   const char *path;
+#ifndef DISABLE_VFS
+  // Unnamed files are normally given a name by linking /proc/self/fd/N,
+  // which the VFS's procfs can't do, and hosts like Windows don't have
+  // them at all. Programs fall back to named temporary files.
+  if ((oflags & O_TMPFILE_LINUX) == O_TMPFILE_LINUX) return eopnotsupp();
+#endif
 #ifndef O_TMPFILE
 #ifndef DISABLE_NONPOSIX
   if ((oflags & O_TMPFILE_LINUX) == O_TMPFILE_LINUX) {

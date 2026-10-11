@@ -1525,7 +1525,7 @@ static pureconst bool UsesStaticMemory(u64 rde) {
 static void ClobberEverythingExceptResult(struct Machine *m) {
 #ifdef DEBUG
 // clobber everything except result registers
-#if defined(__x86_64__) && !defined(__CYGWIN__)
+#if defined(__x86_64__) && !defined(WIN64_ABI)
   AppendJitSetReg(m->path.jb, kAmdDi, 0x666);
   AppendJitSetReg(m->path.jb, kAmdSi, 0x666);
   AppendJitSetReg(m->path.jb, kAmdCx, 0x666);

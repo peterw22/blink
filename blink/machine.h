@@ -122,7 +122,7 @@
 
 #if defined(NOLINEAR) || defined(__SANITIZE_THREAD__) ||                       \
     defined(__CYGWIN__) || defined(__NetBSD__) || defined(__COSMOPOLITAN__) || \
-    defined(__FILC__)
+    defined(__FILC__) || defined(_WIN32)
 #define CanHaveLinearMemory() false
 #else
 #define CanHaveLinearMemory() CAN_64BIT
