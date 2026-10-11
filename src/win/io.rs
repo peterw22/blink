@@ -15,7 +15,7 @@ use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{GetFileSizeEx, GetFileType, ReadFile, WriteFile};
 use windows_sys::Win32::System::Console::{GetConsoleMode, GetNumberOfConsoleInputEvents, GetStdHandle};
 use windows_sys::Win32::System::Pipes::PeekNamedPipe;
-use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+use windows_sys::Win32::System::Threading::CreateEventW;
 use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 
 thread_local! {
@@ -692,7 +692,6 @@ pub extern "C" fn lseek(fdn: c_int, off: i64, whence: c_int) -> i64 {
 // --- poll ---
 
 pub const POLLIN: i16 = 0x1;
-pub const POLLPRI: i16 = 0x2;
 pub const POLLOUT: i16 = 0x4;
 pub const POLLERR: i16 = 0x8;
 pub const POLLHUP: i16 = 0x10;
@@ -967,9 +966,4 @@ pub fn init_std() {
         let flags = if fdn == 0 { O_RDONLY } else { O_WRONLY };
         fd::set(fdn, OpenFile::new(Obj::Std { handle: h }, flags), false);
     }
-}
-
-#[allow(dead_code)]
-fn _wait(h: HANDLE) {
-    unsafe { WaitForSingleObject(h, INFINITE) };
 }

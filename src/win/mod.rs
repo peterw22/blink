@@ -3,8 +3,7 @@
 //!
 //! blink's C is compiled against the POSIX headers in win/include (Linux
 //! numbering for flags and structs) and calls the functions defined here.
-//! Functions that aren't implemented yet are in `stubs` and abort with
-//! their name, so each test run says what to write next.
+//! Every POSIX function blink's C calls on Windows is defined here.
 
 /// BLINKWIN_TRACE=1 logs host-layer calls to stderr (see `trace!`).
 pub(crate) fn tracing() -> bool {
@@ -31,7 +30,6 @@ mod misc;
 mod net;
 pub mod rootfs;
 mod signal;
-mod stubs;
 mod thread;
 mod time;
 
@@ -64,8 +62,3 @@ pub fn init_terminal(root: &str, output: Box<dyn Fn(&[u8]) + Send + Sync>, rows:
     tty
 }
 
-/// Called by a POSIX function that isn't implemented yet.
-pub(crate) fn missing(name: &str) -> ! {
-    eprintln!("blink-xbox: POSIX function {name}() isn't implemented on Windows yet");
-    std::process::abort()
-}

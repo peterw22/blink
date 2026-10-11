@@ -256,7 +256,7 @@ pub unsafe extern "C" fn posix_memalign(out: *mut *mut c_void, align: usize, siz
 /// the JIT's calls into blink stay 5-byte rel32 calls.
 #[unsafe(no_mangle)]
 pub extern "C" fn blinkwin_alloc_jit(size: usize) -> *mut c_void {
-    let here = blinkwin_alloc_jit as usize;
+    let here = blinkwin_alloc_jit as *const () as usize;
     let step = 64 << 20;
     for i in 1..30usize {
         for dir in [1isize, -1] {

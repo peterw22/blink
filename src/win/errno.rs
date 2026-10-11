@@ -1,6 +1,8 @@
 //! errno: ucrt's thread-local errno, with ucrt's numbers (win/include/errno.h
 //! adds names ucrt lacks, from 200 up). blink translates them to Linux's.
 
+#![allow(dead_code)] // the full table, for reference
+
 use std::ffi::c_int;
 
 pub const EPERM: c_int = 1;

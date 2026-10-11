@@ -117,6 +117,18 @@ pub fn install() {
         .expect("failed to start signal forwarding thread");
 }
 
+/// Waits for the initial process to exit; returns its exit status the way
+/// a shell reports it (128 + signal when killed).
+pub fn wait_root_exit() -> i32 {
+    let mut t = table();
+    loop {
+        if let Some(w) = t.procs.get(&t.root).and_then(|p| p.status) {
+            return if w & 127 != 0 { 128 + (w & 127) } else { (w >> 8) & 255 };
+        }
+        t = CHANGED.wait(t).unwrap_or_else(|e| e.into_inner());
+    }
+}
+
 /// Sends `sig` to the initial process's process group, as a terminal does
 /// for ^C and window resizes.
 pub fn signal_foreground(sig: c_int) {

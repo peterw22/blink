@@ -8,7 +8,7 @@
 //! symlinks are read too.
 
 use super::errno;
-use super::fd::{self, Obj, OpenFile, O_ACCMODE, O_APPEND, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_PATH, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
+use super::fd::{self, Obj, OpenFile, O_ACCMODE, O_APPEND, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_PATH, O_RDONLY, O_TRUNC, O_WRONLY};
 use super::time::Timespec;
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::Mutex;
@@ -1102,15 +1102,4 @@ pub unsafe extern "C" fn dirfd(d: *mut DirStream) -> c_int {
     unsafe { (*d).fd }
 }
 
-/// The directory a descriptor names, for fstatvfs etc.
-pub fn dir_path(fdn: c_int) -> Option<String> {
-    match &fd::get(fdn).ok()?.obj {
-        Obj::Dir { path, .. } => Some(path.clone()),
-        _ => None,
-    }
-}
 
-#[allow(dead_code)]
-fn _unused(_: u32) -> u32 {
-    O_RDWR
-}

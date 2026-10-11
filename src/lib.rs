@@ -104,9 +104,21 @@ where
 pub struct Session {
     /// keyboard input in (`push_input`), resizes (`set_winsize`)
     pub terminal: std::sync::Arc<win::Tty>,
-    /// blink's thread; when the guest's first process exits, blink exits
-    /// the host process (for now)
+    /// blink's thread (it ends inside blink; use `wait`)
     pub thread: std::thread::JoinHandle<i32>,
+}
+
+#[cfg(windows)]
+impl Session {
+    /// Waits for the guest's first process to exit; its exit status.
+    pub fn wait(&self) -> i32 {
+        procs::wait_root_exit()
+    }
+}
+
+#[cfg(windows)]
+extern "C" {
+    fn SetEmbedded(on: bool);
 }
 
 /// Runs `argv` (a path inside the guest, then its arguments) in the Linux
@@ -114,6 +126,8 @@ pub struct Session {
 /// to its terminal goes to `output`.
 #[cfg(windows)]
 pub fn start(root: &str, argv: Vec<String>, env: Vec<String>, output: Box<dyn Fn(&[u8]) + Send + Sync>, rows: u16, cols: u16) -> Session {
+    // the app outlives the guest
+    unsafe { SetEmbedded(true) };
     let terminal = win::init_terminal(root, output, rows, cols);
     *terminal.on_signal.lock().unwrap() = Some(Box::new(procs::signal_foreground));
     procs::install();

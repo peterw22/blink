@@ -8,7 +8,6 @@ use super::errno;
 use super::fd::{self, Obj, OpenFile, O_CLOEXEC, O_NONBLOCK, O_RDWR};
 use super::thread;
 use std::ffi::{c_char, c_int, c_void, CStr};
-use std::time::Duration;
 use windows_sys::Win32::Networking::WinSock as ws;
 
 const AF_UNIX: c_int = 1;
@@ -585,9 +584,4 @@ pub unsafe extern "C" fn blinkwin_inet_pton(af: c_int, src: *const c_char, dst: 
         },
         _ => errno::fail(errno::EAFNOSUPPORT),
     }
-}
-
-#[allow(dead_code)]
-fn _d() -> Duration {
-    Duration::ZERO
 }

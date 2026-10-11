@@ -12,7 +12,7 @@ use std::ffi::{c_int, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Threading::{
     AcquireSRWLockExclusive, CreateThread, ExitThread, GetCurrentThreadId, INFINITE,
     InitOnceExecuteOnce, ReleaseSRWLockExclusive, SleepConditionVariableSRW, SwitchToThread,
@@ -499,13 +499,4 @@ pub extern "C" fn sched_setaffinity(_pid: c_int, _size: usize, _set: *const u8) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __sched_cpucount(size: usize, set: *const u8) -> c_int {
     (0..size).map(|i| unsafe { *set.add(i) }.count_ones() as c_int).sum()
-}
-
-/// Waits for a Win32 handle, returning Err(EINTR) if interrupted.
-pub fn wait_handle(h: HANDLE, timeout: Option<Duration>) -> Result<bool, c_int> {
-    wait_for(timeout, || {
-        // SAFETY: the caller owns h for the duration of the wait
-        (unsafe { WaitForSingleObject(h, 0) } == WAIT_OBJECT_0).then_some(())
-    })
-    .map(|r| r.is_some())
 }
