@@ -1,0 +1,46 @@
+[package]
+name = "blink-term"
+version = "0.1.0"
+edition = "2021"
+description = "A terminal emulator UWP app for the Xbox that runs Linux programs (Claude Code) under blink"
+license = "ISC"
+
+[dependencies]
+blink-xbox = { path = "../blink-xbox" }
+fontdue = "0.9"
+bytemuck = { version = "1", features = ["derive"] }
+unicode-width = "0.2"
+
+[dependencies.windows]
+version = "0.61"
+features = [
+    "ApplicationModel_Core",
+    "ApplicationModel_Activation",
+    "Foundation",
+    "Gaming_Input",
+    "Graphics_Display",
+    "Graphics_Display_Core",
+    "Storage",
+    "Storage_Search",
+    "System",
+    "System_Display",
+    "UI_Core",
+    "UI_Text_Core",
+    "UI_ViewManagement",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_WinRT",
+]
+
+[dependencies.windows-core]
+version = "0.61"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+panic = "abort"
+debug = 1

@@ -1,0 +1,17 @@
+# Cross-compile from Linux: rustc's bundled rust-lld as the MSVC linker, CRT and Windows SDK
+# import libraries from `xwin splat --output ~/.local/share/xwin`. The CRT is linked statically
+# and the image is flagged /APPCONTAINER, which UWP activation requires.
+[build]
+target = "x86_64-pc-windows-msvc"
+
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
+rustflags = [
+    "-C", "linker-flavor=lld-link",
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/APPCONTAINER",
+    "-C", "link-arg=/ignore:4099",
+    "-L", "native=/home/tingouw/.local/share/xwin/crt/lib/x86_64",
+    "-L", "native=/home/tingouw/.local/share/xwin/sdk/lib/um/x86_64",
+    "-L", "native=/home/tingouw/.local/share/xwin/sdk/lib/ucrt/x86_64",
+]
