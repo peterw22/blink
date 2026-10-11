@@ -42,8 +42,10 @@ struct ProcessHost {
 
 extern const struct ProcessHost *g_prochost;
 extern int g_rootpid;  // pid of the initial process
+extern bool g_embedded;
 
 void SetProcessHost(const struct ProcessHost *);
+void SetEmbedded(bool);
 int SignalSystem(struct System *, int);
 bool IsMachineInterrupted(struct Machine *);
 int TakeHostSignals(void);

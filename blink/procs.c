@@ -24,6 +24,16 @@
 
 const struct ProcessHost *g_prochost;
 int g_rootpid;
+bool g_embedded;
+
+/**
+ * Keeps the host process alive when the initial guest process exits (an
+ * app embedding blink, like the Xbox terminal): it's cleaned up like any
+ * other process, and the host learns through ProcessHost.Exit.
+ */
+void SetEmbedded(bool on) {
+  g_embedded = on;
+}
 
 static _Atomic(u64) g_hostsigs;
 
@@ -301,7 +311,7 @@ _Noreturn void ExitGuestProcess(struct Machine *m, int wstatus) {
   s = m->system;
   pid = s->pid;
   THR_LOGF("pid=%d tid=%d ExitGuestProcess(%#x)", pid, m->tid, wstatus);
-  if (pid == g_rootpid) {
+  if (pid == g_rootpid && !g_embedded) {
     // the whole host process is going away; don't wait for threads
     g_prochost->Exit(pid, wstatus);
     _Exit((wstatus & 127) ? 128 + (wstatus & 127) : (wstatus >> 8) & 255);
