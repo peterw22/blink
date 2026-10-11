@@ -369,7 +369,13 @@ fn session(term: Arc<Mutex<Term>>, rows: u16, cols: u16) {
     .map(|s| s.to_string())
     .collect();
     let out_term = term.clone();
+    // a copy of everything the guest writes, so a crash leaves its last words
+    let mirror = Mutex::new(File::create(local.join("term.log")).ok());
     let output = Box::new(move |bytes: &[u8]| {
+        if let Some(f) = mirror.lock().unwrap().as_mut() {
+            let _ = f.write_all(bytes);
+            let _ = f.flush();
+        }
         let replies = {
             let mut t = out_term.lock().unwrap();
             t.feed(bytes);
@@ -379,6 +385,13 @@ fn session(term: Arc<Mutex<Term>>, rows: u16, cols: u16) {
         if !replies.is_empty() {
             send(&replies);
         }
+    });
+    std::thread::spawn(|| loop {
+        // the app's memory use against the console's limit for it
+        use windows::System::MemoryManager;
+        let (u, l) = (MemoryManager::AppMemoryUsage().unwrap_or(0), MemoryManager::AppMemoryUsageLimit().unwrap_or(0));
+        log!("memory: {} MB of {} MB", u >> 20, l >> 20);
+        std::thread::sleep(Duration::from_secs(5));
     });
     let s = blink_xbox::start(&root.to_string_lossy(), argv, env, output, rows, cols);
     let _ = INPUT.set(s.terminal.clone());
