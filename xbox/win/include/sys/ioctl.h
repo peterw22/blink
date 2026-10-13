@@ -1,0 +1,27 @@
+#ifndef BLINKWIN_SYS_IOCTL_H_
+#define BLINKWIN_SYS_IOCTL_H_
+#include <termios.h>
+#define TCGETS 0x5401
+#define TCSETS 0x5402
+#define TCSETSW 0x5403
+#define TCSETSF 0x5404
+#define TIOCSCTTY 0x540E
+#define TIOCGPGRP 0x540F
+#define TIOCSPGRP 0x5410
+#define TIOCOUTQ 0x5411
+#define TIOCGWINSZ 0x5413
+#define TIOCSWINSZ 0x5414
+#define FIONREAD 0x541B
+#define TIOCINQ FIONREAD
+#define TIOCNOTTY 0x5422
+#define FIONBIO 0x5421
+#define FIOCLEX 0x5451
+#define FIONCLEX 0x5450
+#define FIOASYNC 0x5452
+#define SIOCGIFCONF 0x8912
+#define SIOCGIFFLAGS 0x8913
+#define SIOCGIFADDR 0x8915
+#define SIOCGIFNETMASK 0x891b
+#define SIOCGIFBRDADDR 0x8919
+int ioctl(int, unsigned long, ...);
+#endif
