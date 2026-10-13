@@ -3,7 +3,7 @@
 # Windows config and POSIX shim headers. usage: check.sh [file.c...]
 # Prints "file: first error" per failing file and a total.
 here=$(cd "$(dirname "$0")" && pwd)
-blink=${BLINK_DIR:-$here/../../blink}
+blink=${BLINK_DIR:-$here/../..}
 X=$HOME/.local/share/xwin
 flags=(--target=x86_64-pc-windows-msvc -fms-compatibility-version=19.44 -fgnuc-version=4.2.1
   -std=gnu11 -w -fsyntax-only -include "$here/include/blinkwin.h"

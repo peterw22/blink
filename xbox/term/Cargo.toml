@@ -6,7 +6,7 @@ description = "A terminal emulator UWP app for the Xbox that runs Linux programs
 license = "ISC"
 
 [dependencies]
-blink-xbox = { path = "../blink-xbox" }
+blink-xbox = { path = ".." }
 fontdue = "0.9"
 bytemuck = { version = "1", features = ["derive"] }
 unicode-width = "0.2"

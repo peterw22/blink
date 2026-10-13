@@ -1,4 +1,4 @@
-// Compiles the C blink emulator (../blink, branch run-claude-code) into a static
+// Compiles the C blink emulator (this repository's blink/, one level up) into a static
 // library linked into this crate. BLINK_DIR overrides the source location.
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,7 +19,7 @@ fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let blink = std::env::var("BLINK_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| manifest.join("../blink"));
+        .unwrap_or_else(|_| manifest.join(".."));
     let blink = blink.canonicalize().expect("blink sources not found; set BLINK_DIR");
     let target = std::env::var("TARGET").unwrap();
     println!("cargo:rerun-if-env-changed=BLINK_DIR");
